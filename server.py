@@ -5,8 +5,27 @@ from urllib.parse import urlsplit, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parent
-DATA = ROOT / 'downloads'
-DATA.mkdir(exist_ok=True)
+DATA = Path(os.environ.get('VIDEO_SAVER_DIR', '/Volumes/M2NVMe/YouTubeMP4')).expanduser().absolute()
+
+def ensure_storage():
+    # /Volumes直下のマウントが消えたとき、内蔵ドライブへ代替保存しない。
+    if DATA.parts[:2] == ('/', 'Volumes'):
+        if len(DATA.parts) < 4:
+            raise OSError('保存先には外付けSSD内のフォルダーを指定してください')
+        volume = Path(*DATA.parts[:3])
+        if not volume.is_mount() or volume.is_symlink():
+            raise OSError(f'外付けSSDが接続されていません: {volume}')
+        if not DATA.resolve().is_relative_to(volume.resolve()):
+            raise OSError('保存先が指定のSSDの外を指しています')
+    DATA.mkdir(parents=True, exist_ok=True)
+    if DATA.parts[:2] == ('/', 'Volumes') and DATA.stat().st_dev != volume.stat().st_dev:
+        raise OSError('保存先が指定のSSDと異なるドライブにあります')
+    return DATA
+
+try:
+    ensure_storage()
+except OSError as exc:
+    raise SystemExit(f'保存先を使用できません: {exc}') from exc
 TOKEN = secrets.token_urlsafe(24)
 JOBS = {}
 LOCK = threading.RLock()
@@ -34,6 +53,7 @@ def canonical_url(value):
 def update(job, **values):
     with LOCK:
         job.update(values)
+        ensure_storage()
         target = DATA / job['id'] / 'job.json'
         tmp = target.with_suffix('.tmp')
         tmp.write_text(json.dumps(job, ensure_ascii=False))
@@ -44,8 +64,9 @@ def worker():
         job = QUEUE.get()
         directory = DATA / job['id']
         try:
+            ensure_storage()
             if shutil.disk_usage(DATA).free < 3 * 1024**3:
-                raise RuntimeError('Macの空き容量が3GB未満です')
+                raise RuntimeError(f'保存先の空き容量が3GiB未満です: {DATA}')
             update(job, status='取得中', progress='接続しています')
             h = job['height']
             cmd = ['yt-dlp', '--ignore-config', '--no-playlist', '--no-colors', '--newline',
@@ -71,7 +92,12 @@ def worker():
             info = json.loads((directory / 'video.info.json').read_text())
             update(job, status='完了', progress='保存できます', title=info.get('title', '動画'), size=file.stat().st_size)
         except Exception as e:
-            update(job, status='失敗', progress=str(e)[-1200:])
+            try:
+                update(job, status='失敗', progress=str(e)[-1200:])
+            except OSError:
+                # SSD切断時もメモリー内に失敗理由を残し、ワーカーを継続する。
+                with LOCK:
+                    job.update(status='失敗', progress=str(e)[-1200:])
         finally:
             QUEUE.task_done()
 
@@ -150,6 +176,7 @@ class Handler(BaseHTTPRequestHandler):
             height = int(data.get('height', 720))
             if height not in (360, 720, 1080):
                 raise ValueError('画質が不正です')
+            ensure_storage()
             with LOCK:
                 if QUEUE.full():
                     return self.reply(429, {'error': '待機件数が上限です'})
@@ -161,11 +188,15 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(201, job)
         except (ValueError, KeyError, TypeError) as e:
             self.reply(400, {'error': str(e)})
+        except OSError as e:
+            self.reply(503, {'error': f'保存先を使用できません: {e}'})
 
 if __name__ == '__main__':
     for binary in ('yt-dlp', 'ffmpeg', 'deno'):
         if not shutil.which(binary):
             raise SystemExit(f'{binary}がありません。setup.commandを実行してください')
+    print(f'保存先: {DATA}', flush=True)
+    print(f'保存先の空き容量: {shutil.disk_usage(DATA).free / 1024**3:.1f} GiB', flush=True)
     server = ThreadingHTTPServer(('0.0.0.0', 8765), Handler)
     threading.Thread(target=worker, daemon=True).start()
     print('\n同じWi-FiのiPhoneで、次のURLを開いてください（接続キー付き）', flush=True)

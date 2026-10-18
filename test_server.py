@@ -1,7 +1,11 @@
 import json, threading, unittest
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
+import os, tempfile
+_storage = tempfile.TemporaryDirectory()
+os.environ['VIDEO_SAVER_DIR'] = _storage.name
 import server
+from unittest.mock import patch
 
 class Tests(unittest.TestCase):
     @classmethod
@@ -15,6 +19,20 @@ class Tests(unittest.TestCase):
         for job in list(server.JOBS.values()):
             if job.get('title') == 'TEST':
                 server.shutil.rmtree(server.DATA / job['id'])
+    def test_missing_ssd_does_not_create_directory(self):
+        with patch.object(server, 'DATA', server.Path('/Volumes/MissingVideoSaverSSD/YouTubeMP4')):
+            with patch.object(server.Path, 'is_mount', return_value=False):
+                with patch.object(server.Path, 'mkdir') as mkdir:
+                    with self.assertRaises(OSError): server.ensure_storage()
+                    mkdir.assert_not_called()
+
+    def test_external_storage_is_created(self):
+        with tempfile.TemporaryDirectory() as base:
+            target = server.Path(base) / 'SSD' / 'videos'
+            with patch.object(server, 'DATA', target):
+                self.assertEqual(server.ensure_storage(), target)
+                self.assertTrue(target.is_dir())
+
     def test_urls(self):
         for u in ('https://youtu.be/abcdefghijk?t=3', 'https://www.youtube.com/shorts/abcdefghijk', 'https://www.youtube.com/watch?v=abcdefghijk&list=x'):
             self.assertEqual(server.canonical_url(u), 'https://www.youtube.com/watch?v=abcdefghijk')
