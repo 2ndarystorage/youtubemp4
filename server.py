@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import errno
 import json, os, queue, re, secrets, shutil, socket, subprocess, threading, uuid
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
@@ -191,13 +192,31 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as e:
             self.reply(503, {'error': f'保存先を使用できません: {e}'})
 
+def create_server(port=8765, host='0.0.0.0', attempts=10):
+    if not 1 <= port <= 65535:
+        raise ValueError('VIDEO_SAVER_PORTは1〜65535で指定してください')
+    for candidate in range(port, min(port + attempts, 65536)):
+        try:
+            return ThreadingHTTPServer((host, candidate), Handler)
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+    raise OSError(errno.EADDRINUSE, f'{port}番からの候補ポートがすべて使用中です。VIDEO_SAVER_PORTで別の番号を指定してください')
+
 if __name__ == '__main__':
     for binary in ('yt-dlp', 'ffmpeg', 'deno'):
         if not shutil.which(binary):
             raise SystemExit(f'{binary}がありません。setup.commandを実行してください')
     print(f'保存先: {DATA}', flush=True)
     print(f'保存先の空き容量: {shutil.disk_usage(DATA).free / 1024**3:.1f} GiB', flush=True)
-    server = ThreadingHTTPServer(('0.0.0.0', 8765), Handler)
+    try:
+        requested_port = int(os.environ.get('VIDEO_SAVER_PORT', '8765'))
+        server = create_server(requested_port)
+    except (ValueError, OSError) as exc:
+        raise SystemExit(f'起動できません: {exc}') from exc
+    actual_port = server.server_port
+    if actual_port != requested_port:
+        print(f'{requested_port}番は使用中のため、{actual_port}番で起動します。', flush=True)
     threading.Thread(target=worker, daemon=True).start()
     print('\n同じWi-FiのiPhoneで、次のURLを開いてください（接続キー付き）', flush=True)
     addresses = {'127.0.0.1'}
@@ -207,7 +226,7 @@ if __name__ == '__main__':
     except (OSError, subprocess.SubprocessError):
         pass
     for ip in sorted(addresses):
-        print(f'http://{ip}:8765/?key={TOKEN}', flush=True)
+        print(f'http://{ip}:{actual_port}/?key={TOKEN}', flush=True)
     print('停止: Control+C。再起動すると接続キーが変わります。', flush=True)
     try:
         server.serve_forever()

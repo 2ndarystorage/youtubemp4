@@ -33,6 +33,32 @@ class Tests(unittest.TestCase):
                 self.assertEqual(server.ensure_storage(), target)
                 self.assertTrue(target.is_dir())
 
+    def test_busy_port_uses_another_port(self):
+        busy = server.ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
+        try:
+            fallback = server.create_server(busy.server_port, host='127.0.0.1')
+            try:
+                self.assertGreater(fallback.server_port, busy.server_port)
+                self.assertLess(fallback.server_port, busy.server_port + 10)
+                threading.Thread(target=fallback.serve_forever, daemon=True).start()
+                with urlopen(f'http://127.0.0.1:{fallback.server_port}/?key={server.TOKEN}') as r:
+                    self.assertEqual(r.status, 200)
+                fallback.shutdown()
+            finally:
+                fallback.server_close()
+        finally:
+            busy.server_close()
+
+    def test_busy_ports_report_clear_error(self):
+        busy = server.ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
+        try:
+            with self.assertRaises(OSError):
+                server.create_server(busy.server_port, host='127.0.0.1', attempts=1)
+        finally:
+            busy.server_close()
+        with self.assertRaises(ValueError):
+            server.create_server(70000)
+
     def test_urls(self):
         for u in ('https://youtu.be/abcdefghijk?t=3', 'https://www.youtube.com/shorts/abcdefghijk', 'https://www.youtube.com/watch?v=abcdefghijk&list=x'):
             self.assertEqual(server.canonical_url(u), 'https://www.youtube.com/watch?v=abcdefghijk')
