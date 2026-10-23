@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 .DS_Store
 .venv/
+
+# Xcode local state
+DerivedData/
+xcuserdata/
+*.xcuserstate

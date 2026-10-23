@@ -123,3 +123,8 @@ VIDEO_SAVER_PORT=8800 bash start.command
 使用中のプロセスを確認するだけなら、Macで `lsof -nP -iTCP:8765 -sTCP:LISTEN` を実行します。古いサーバーを開いているターミナルが分かる場合は、そこでControl+Cで停止できます。
 
 検証：既存6件に加え、ポートを実際に占有した状態で別ポートのHTTPページ応答が成功すること、候補がすべて使用中ならエラーになることを確認しました（計8件）。Mac実機での起動は未検証です。
+
+
+## iPhone / iPadネイティブアプリ
+
+`ios/YouTubeMP4/YouTubeMP4.xcodeproj` にSwiftUIアプリを追加しました。Macへの動画取得依頼・履歴確認・iPhone保存に加え、端末内再生と区間切り取りのソースを含みます。Xcodeでのビルド・署名・実機検証は未実施です。導入方法と制限は [ios/README.md](ios/README.md) を参照してください。
