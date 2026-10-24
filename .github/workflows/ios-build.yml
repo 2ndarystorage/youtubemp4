@@ -1,0 +1,19 @@
+name: iOS simulator build
+on:
+  push:
+    branches: [main]
+    paths: ['ios/**', '.github/workflows/ios-build.yml']
+  pull_request:
+    paths: ['ios/**', '.github/workflows/ios-build.yml']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build standalone iPhone app
+        run: |
+          set -o pipefail
+          xcodebuild -project ios/YouTubeMP4/YouTubeMP4.xcodeproj -scheme YouTubeMP4 -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath /tmp/YouTubeMP4-build CODE_SIGNING_ALLOWED=NO build | tee /tmp/YouTubeMP4-build.log

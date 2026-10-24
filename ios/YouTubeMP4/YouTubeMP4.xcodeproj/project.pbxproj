@@ -30,7 +30,7 @@
 		};
 		"000000000000000000000003" = {
 			"isa" = "PBXGroup";
-			"children" = ("000000000000000000000005","000000000000000000000006");
+			"children" = ("000000000000000000000005","000000000000000000000006","000000000000000000000067");
 			"path" = "YouTubeMP4";
 			"sourceTree" = "<group>";
 		};
@@ -54,13 +54,13 @@
 		"00000000000000000000000A" = {
 			"isa" = "PBXFrameworksBuildPhase";
 			"buildActionMask" = "2147483647";
-			"files" = ();
+			"files" = ("000000000000000000000066");
 			"runOnlyForDeploymentPostprocessing" = "0";
 		};
 		"00000000000000000000000B" = {
 			"isa" = "PBXResourcesBuildPhase";
 			"buildActionMask" = "2147483647";
-			"files" = ();
+			"files" = ("000000000000000000000068");
 			"runOnlyForDeploymentPostprocessing" = "0";
 		};
 		"00000000000000000000000C" = {
@@ -73,6 +73,7 @@
 			"productName" = "YouTubeMP4";
 			"productReference" = "000000000000000000000007";
 			"productType" = "com.apple.product-type.application";
+			"packageProductDependencies" = ("000000000000000000000065");
 		};
 		"00000000000000000000000F" = {
 			"isa" = "XCBuildConfiguration";
@@ -153,6 +154,34 @@
 			"projectDirPath" = "";
 			"projectRoot" = "";
 			"targets" = ("00000000000000000000000C");
+			"packageReferences" = ("000000000000000000000064");
+		};
+		"000000000000000000000064" = {
+			"isa" = "XCRemoteSwiftPackageReference";
+			"repositoryURL" = "https://github.com/alexeichhorn/YouTubeKit.git";
+			"requirement" = {
+				"kind" = "exactVersion";
+				"version" = "0.4.9";
+			};
+		};
+		"000000000000000000000065" = {
+			"isa" = "XCSwiftPackageProductDependency";
+			"package" = "000000000000000000000064";
+			"productName" = "YouTubeKit";
+		};
+		"000000000000000000000066" = {
+			"isa" = "PBXBuildFile";
+			"productRef" = "000000000000000000000065";
+		};
+		"000000000000000000000067" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "text";
+			"path" = "YouTubeKit-LICENSE.txt";
+			"sourceTree" = "<group>";
+		};
+		"000000000000000000000068" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "000000000000000000000067";
 		};
 	};
 	"rootObject" = "000000000000000000000001";

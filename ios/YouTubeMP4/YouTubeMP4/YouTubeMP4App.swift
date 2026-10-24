@@ -1,17 +1,11 @@
 import SwiftUI
 import AVKit
+import UniformTypeIdentifiers
+import YouTubeKit
 
 @main
 struct YouTubeMP4App: App {
     var body: some Scene { WindowGroup { HomeView() } }
-}
-
-struct VideoJob: Decodable, Identifiable {
-    let id: String
-    let title: String
-    let status: String
-    let progress: String
-    let size: Int64?
 }
 
 struct LocalVideo: Identifiable {
@@ -25,247 +19,282 @@ struct ServiceError: LocalizedError {
     var errorDescription: String? { message }
 }
 
-struct Connection: Equatable {
-    let base: URL
-    let key: String
-
-    init(_ text: String) throws {
-        guard let parts = URLComponents(string: text.trimmingCharacters(in: .whitespacesAndNewlines)),
-              parts.scheme == "http" || parts.scheme == "https",
-              let host = parts.host, parts.user == nil, parts.password == nil,
-              Self.isLocal(host),
-              let key = parts.queryItems?.first(where: { $0.name == "key" })?.value,
-              !key.isEmpty else {
-            throw ServiceError(message: "Macの起動時に表示された、key付きの自宅LAN用URLを貼り付けてください。")
+// Download progress is delivered by URLSession off the main thread.
+final class TransferProgress: NSObject, URLSessionDownloadDelegate {
+    let report: @Sendable (Double?) -> Void
+    init(report: @escaping @Sendable (Double?) -> Void) { self.report = report }
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        if totalBytesWritten > 2 * 1024 * 1024 * 1024 || totalBytesExpectedToWrite > 2 * 1024 * 1024 * 1024 {
+            downloadTask.cancel()
+            return
         }
-        var base = URLComponents()
-        base.scheme = parts.scheme
-        base.host = host
-        base.port = parts.port
-        guard let url = base.url else { throw ServiceError(message: "接続URLが正しくありません。") }
-        self.base = url
-        self.key = key
+        report(totalBytesExpectedToWrite > 0 ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite) : nil)
     }
-
-    static func isLocal(_ host: String) -> Bool {
-        if host.hasSuffix(".local") { return true }
-        let pieces = host.split(separator: ".", omittingEmptySubsequences: false)
-        guard pieces.count == 4 else { return false }
-        let octets = pieces.compactMap { Int($0) }
-        guard octets.count == 4, octets.allSatisfy({ (0...255).contains($0) }) else { return false }
-        return octets[0] == 10 || (octets[0] == 192 && octets[1] == 168)
-            || (octets[0] == 172 && (16...31).contains(octets[1]))
-    }
-
-    func request(_ path: String) -> URLRequest {
-        var request = URLRequest(url: base.appendingPathComponent(path))
-        request.setValue(key, forHTTPHeaderField: "X-Access-Key")
-        request.timeoutInterval = 30
-        return request
-    }
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {}
 }
 
 @MainActor
 final class VideoStore: ObservableObject {
-    @Published var jobs: [VideoJob] = []
     @Published var videos: [LocalVideo] = []
-    @Published var connection: Connection?
+    @Published var busy = false
+    @Published var status = "URLを貼り付けて開始してください"
+    @Published var fraction: Double?
     @Published var message = ""
-    @Published var submitting = false
-    @Published var downloading: Set<String> = []
-    @Published var loading = false
-    private var generation = UUID()
-    private var lastRefreshError = ""
+    private var operation: Task<Void, Never>?
+    private var exporter: AVAssetExportSession?
     private let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 3600
+        config.urlCache = nil
         return URLSession(configuration: config)
     }()
+
     static var documents: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
-
     init() { scanVideos() }
 
+    static func videoID(from value: String) throws -> String {
+        guard let parts = URLComponents(string: value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              parts.scheme == "https" || parts.scheme == "http",
+              parts.user == nil, parts.password == nil,
+              parts.port == nil || parts.port == 443 || parts.port == 80,
+              let host = parts.host?.lowercased() else {
+            throw ServiceError(message: "YouTubeの動画URLを入力してください。")
+        }
+        let components = parts.path.split(separator: "/").map(String.init)
+        let id: String?
+        switch host {
+        case "youtu.be", "www.youtu.be":
+            id = components.count == 1 ? components.first : nil
+        case "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com":
+            if parts.path == "/watch" { id = parts.queryItems?.first(where: { $0.name == "v" })?.value }
+            else if components.count == 2, ["shorts", "live", "embed"].contains(components[0]) { id = components[1] }
+            else { id = nil }
+        default: id = nil
+        }
+        guard let id, id.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil else {
+            throw ServiceError(message: "単体のYouTube動画URLを入力してください。再生リストには対応していません。")
+        }
+        return id
+    }
+
     func scanVideos() {
-        videos = ((try? FileManager.default.contentsOfDirectory(at: Self.documents,
-                     includingPropertiesForKeys: nil)) ?? [])
+        videos = ((try? FileManager.default.contentsOfDirectory(at: Self.documents, includingPropertiesForKeys: nil)) ?? [])
             .filter { $0.pathExtension.lowercased() == "mp4" }
-            .sorted { $0.lastPathComponent > $1.lastPathComponent }
-            .map { LocalVideo(url: $0) }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }.map { LocalVideo(url: $0) }
     }
-
-    func connect(_ text: String) async {
-        do {
-            let next = try Connection(text)
-            generation = UUID()
-            connection = next
-            lastRefreshError = ""
-            jobs = []
-            await refresh()
-        } catch { message = error.localizedDescription }
-    }
-
-    func disconnect() {
-        generation = UUID()
-        connection = nil
-        jobs = []
-    }
-
-    private func check(_ response: URLResponse, data: Data? = nil) throws {
-        guard let http = response as? HTTPURLResponse else {
-            throw ServiceError(message: "Macからの応答を確認できません。")
-        }
-        guard (200...299).contains(http.statusCode) else {
-            if http.statusCode == 403 {
-                throw ServiceError(message: "接続キーが無効です。Macの最新の接続URLを貼り直してください。")
-            }
-            if let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let text = json["error"] as? String { throw ServiceError(message: text) }
-            throw ServiceError(message: "Macからエラーが返りました（HTTP \(http.statusCode)）。")
-        }
-    }
-
-    func refresh() async {
-        guard let connection, !loading else { return }
-        let current = generation
-        loading = true
-        defer { loading = false }
-        do {
-            let (data, response) = try await session.data(for: connection.request("api/jobs"))
-            try check(response, data: data)
-            let result = try JSONDecoder().decode([VideoJob].self, from: data)
-            guard current == generation else { return }
-            jobs = result
-            lastRefreshError = ""
-        } catch {
-            if current == generation, lastRefreshError != error.localizedDescription {
-                lastRefreshError = error.localizedDescription
-                message = error.localizedDescription
-            }
-        }
-    }
-
-    func submit(url: String, height: Int) async -> Bool {
-        guard let connection, !submitting else { return false }
-        submitting = true
-        defer { submitting = false }
-        do {
-            var request = connection.request("api/jobs")
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONSerialization.data(withJSONObject: ["url": url, "height": height])
-            let (data, response) = try await session.data(for: request)
-            try check(response, data: data)
-            await refresh()
-            return true
-        } catch { message = error.localizedDescription; return false }
-    }
-
-    func download(_ job: VideoJob) async {
-        guard let connection, !downloading.contains(job.id) else { return }
-        downloading.insert(job.id)
-        defer { downloading.remove(job.id) }
-        do {
-            var request = connection.request("download/" + job.id)
-            request.timeoutInterval = 3600
-            let (temporary, response) = try await session.download(for: request)
-            defer { try? FileManager.default.removeItem(at: temporary) }
-            try check(response)
-            let base = job.title.components(separatedBy: CharacterSet.alphanumerics.inverted)
-                .filter { !$0.isEmpty }.joined(separator: "_")
-            let title = String(base.prefix(70))
-            let file = Self.documents.appendingPathComponent("\(title.isEmpty ? "動画" : title)-\(UUID().uuidString).mp4")
-            try FileManager.default.moveItem(at: temporary, to: file)
-            scanVideos()
-        } catch { message = error.localizedDescription }
-    }
-
     func remove(_ video: LocalVideo) {
+        guard !busy else { return }
         do { try FileManager.default.removeItem(at: video.url); scanVideos() }
         catch { message = error.localizedDescription }
+    }
+    func cancel() { operation?.cancel(); exporter?.cancelExport() }
+
+    func start(url: String, height: Int) {
+        guard !busy else { return }
+        do {
+            let id = try Self.videoID(from: url)
+            busy = true
+            operation = Task { await process(id: id, height: height) }
+        } catch { message = error.localizedDescription }
+    }
+
+    private func checkCapacity() throws {
+        let values = try Self.documents.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        if let capacity = values.volumeAvailableCapacityForImportantUsage, capacity < 1024 * 1024 * 1024 {
+            throw ServiceError(message: "iPhoneの空き容量が1GiB未満です。動画と一時ファイルを置ける容量を確保してください。")
+        }
+    }
+
+    private func download(_ url: URL, to destination: URL, label: String) async throws {
+        guard url.scheme == "https" else { throw ServiceError(message: "取得元がHTTPSではありません。") }
+        status = label; fraction = nil
+        let delegate = TransferProgress { [weak self] progress in
+            Task { @MainActor in self?.fraction = progress }
+        }
+        let (temp, response) = try await session.download(for: URLRequest(url: url), delegate: delegate)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        try Task.checkCancellation()
+        guard let response = response as? HTTPURLResponse, (200...299).contains(response.statusCode) else {
+            throw ServiceError(message: "動画の取得が拒否されました。取得URLの期限切れやYouTube側の制限が考えられます。")
+        }
+        let size = try temp.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard size > 0, size <= 2 * 1024 * 1024 * 1024 else {
+            throw ServiceError(message: "取得したファイルが空か、1ファイル2GiBの上限を超えています。")
+        }
+        try FileManager.default.moveItem(at: temp, to: destination)
+    }
+
+    private func export(_ asset: AVAsset, to output: URL) async throws {
+        try Task.checkCancellation()
+        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality),
+              session.supportedFileTypes.contains(.mp4) else {
+            throw ServiceError(message: "この映像・音声の組み合わせはMP4へ書き出せません。")
+        }
+        exporter = session
+        defer { exporter = nil }
+        session.outputURL = output
+        session.outputFileType = .mp4
+        session.shouldOptimizeForNetworkUse = true
+        status = "iPhone内でMP4を書き出しています"; fraction = nil
+        await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                session.exportAsynchronously { continuation.resume() }
+            }
+        }, onCancel: { session.cancelExport() })
+        try Task.checkCancellation()
+        guard session.status == .completed else {
+            throw session.error ?? ServiceError(message: "MP4の書き出しに失敗しました。")
+        }
+    }
+
+    private func merge(video: URL, audio: URL, to output: URL) async throws {
+        let videoAsset = AVURLAsset(url: video), audioAsset = AVURLAsset(url: audio)
+        guard let videoTrack = try await videoAsset.loadTracks(withMediaType: .video).first,
+              let audioTrack = try await audioAsset.loadTracks(withMediaType: .audio).first else {
+            throw ServiceError(message: "映像または音声トラックを読み込めませんでした。")
+        }
+        let videoDuration = try await videoAsset.load(.duration)
+        let audioDuration = try await audioAsset.load(.duration)
+        let seconds = min(videoDuration.seconds, audioDuration.seconds)
+        guard seconds.isFinite, seconds > 0 else { throw ServiceError(message: "動画の長さが不正です。") }
+        let range = CMTimeRange(start: .zero, duration: CMTime(seconds: seconds, preferredTimescale: 600))
+        let composition = AVMutableComposition()
+        guard let v = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+              let a = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw ServiceError(message: "動画の結合準備に失敗しました。")
+        }
+        try v.insertTimeRange(range, of: videoTrack, at: .zero)
+        v.preferredTransform = try await videoTrack.load(.preferredTransform)
+        try a.insertTimeRange(range, of: audioTrack, at: .zero)
+        try await export(composition, to: output)
+    }
+
+    private func process(id: String, height: Int) async {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let output = Self.documents.appendingPathComponent("YouTube-\(id)-\(UUID().uuidString).mp4")
+        let previousIdleSetting = UIApplication.shared.isIdleTimerDisabled
+        UIApplication.shared.isIdleTimerDisabled = true
+        defer {
+            try? FileManager.default.removeItem(at: folder)
+            busy = false; fraction = nil; operation = nil
+            UIApplication.shared.isIdleTimerDisabled = previousIdleSetting
+        }
+        do {
+            try checkCapacity()
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            status = "iPhoneで動画情報を確認しています"; fraction = nil
+            // Explicitly disable YouTubeKit's remote extraction fallback.
+            let youtube = YouTube(videoID: id, methods: [.local])
+            let streams = try await youtube.streams
+            try Task.checkCancellation()
+            let videoStreams = streams.filter {
+                $0.fileExtension == .mp4 && $0.isNativelyPlayable && $0.includesVideoTrack
+                    && ($0.videoResolution ?? Int.max) <= height
+            }.sorted { ($0.videoResolution ?? 0) > ($1.videoResolution ?? 0) }
+            guard let chosen = videoStreams.first else {
+                throw ServiceError(message: "指定画質以下の対応MP4が見つかりません。別の画質または動画を試してください。")
+            }
+            let v = folder.appendingPathComponent("video.mp4")
+            try await download(chosen.url, to: v, label: "映像を取得中（\(chosen.videoResolution ?? 0)p）")
+            if chosen.includesVideoAndAudioTrack {
+                let asset = AVURLAsset(url: v)
+                let tracks = try await asset.loadTracks(withMediaType: .video)
+                let audio = try await asset.loadTracks(withMediaType: .audio)
+                guard !tracks.isEmpty, !audio.isEmpty else {
+                    throw ServiceError(message: "取得ファイルに映像または音声がありません。")
+                }
+                try Task.checkCancellation()
+                try FileManager.default.moveItem(at: v, to: output)
+            } else {
+                guard let audio = streams.filter({
+                    $0.includesAudioTrack && !$0.includesVideoTrack && $0.isNativelyPlayable
+                        && ($0.fileExtension == .m4a || $0.fileExtension == .mp4)
+                }).max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) }) else {
+                    throw ServiceError(message: "対応する音声が見つかりません。無音の動画は保存しません。")
+                }
+                let a = folder.appendingPathComponent("audio.m4a")
+                try await download(audio.url, to: a, label: "音声を取得中")
+                try await merge(video: v, audio: a, to: output)
+            }
+            scanVideos(); status = "MP4をiPhoneに保存しました"
+        } catch {
+            try? FileManager.default.removeItem(at: output)
+            if Task.isCancelled { status = "中止しました" }
+            else {
+                status = "取得・変換に失敗しました"
+                message = error.localizedDescription + "\n公開動画でも取得できない場合があります。通信・空き容量・ライブラリの対応状況をご確認ください。"
+            }
+        }
     }
 }
 
 struct HomeView: View {
     @StateObject private var store = VideoStore()
-    @State private var connectionURL = ""
     @State private var youtubeURL = ""
     @State private var height = 720
     @State private var selected: LocalVideo?
-    @Environment(\.scenePhase) private var scenePhase
+    private var licenseText: String {
+        guard let url = Bundle.main.url(forResource: "YouTubeKit-LICENSE", withExtension: "txt"),
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return "YouTubeKit — MIT License / Copyright (c) 2022 Alexander Eichhorn" }
+        return text
+    }
 
     var body: some View {
         NavigationStack {
             List {
-                Section("Mac miniへの接続") {
-                    TextField("http://192.168.…:8765/?key=…", text: $connectionURL)
-                        .textContentType(.URL).keyboardType(.URL)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .privacySensitive()
-                    Button(store.connection == nil ? "接続する" : "接続URLを更新する") {
-                        Task { await store.connect(connectionURL) }
-                    }.disabled(connectionURL.isEmpty || store.loading)
-                    if let connection = store.connection {
-                        Label(connection.base.absoluteString, systemImage: "desktopcomputer")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Button("接続を解除", role: .destructive) { store.disconnect() }
-                    }
+                Section {
+                    Label("iPhoneだけで取得・保存", systemImage: "iphone")
+                    Text("URLの取得からMP4保存まで、この端末で処理します。")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                Section("動画を取得") {
+                Section("YouTubeから取得") {
                     TextField("YouTubeの動画URL", text: $youtubeURL)
                         .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .disabled(store.busy)
                     Picker("画質の上限", selection: $height) {
                         Text("360p").tag(360); Text("720p").tag(720); Text("1080p").tag(1080)
-                    }.pickerStyle(.segmented)
-                    Button(store.submitting ? "送信中…" : "Macで取得を開始") {
-                        Task { if await store.submit(url: youtubeURL, height: height) { youtubeURL = "" } }
-                    }.disabled(store.connection == nil || youtubeURL.isEmpty || store.submitting)
+                    }.pickerStyle(.segmented).disabled(store.busy)
+                    Button("iPhoneで取得・MP4保存") { store.start(url: youtubeURL, height: height) }
+                        .disabled(store.busy || youtubeURL.isEmpty)
                 }
-                Section("Macの処理一覧") {
-                    if store.jobs.isEmpty { Text("接続後に処理履歴を表示します").foregroundStyle(.secondary) }
-                    ForEach(store.jobs) { job in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(job.title).font(.headline).lineLimit(2)
-                            Text(job.status).font(.caption).foregroundStyle(.teal)
-                            Text(job.progress).font(.caption).foregroundStyle(.secondary).lineLimit(5)
-                            if job.status == "完了" {
-                                Button(store.downloading.contains(job.id) ? "iPhoneに保存中…" : "iPhoneに保存") {
-                                    Task { await store.download(job) }
-                                }.disabled(store.downloading.contains(job.id))
-                            }
-                        }.padding(.vertical, 4)
+                Section("処理状況") {
+                    Text(store.status)
+                    if store.busy {
+                        if let fraction = store.fraction { ProgressView(value: fraction) }
+                        else { ProgressView() }
+                        Button("中止する", role: .destructive) { store.cancel() }
                     }
                 }
-                Section("iPhoneに保存した動画") {
-                    if store.videos.isEmpty { Text("保存後はMacに接続せず再生できます").foregroundStyle(.secondary) }
+                Section("保存した動画") {
+                    if store.videos.isEmpty { Text("保存後はオフラインでも再生できます").foregroundStyle(.secondary) }
                     ForEach(store.videos) { video in
                         Button { selected = video } label: {
                             Label(video.title, systemImage: "play.rectangle").lineLimit(2)
-                        }
+                        }.disabled(store.busy)
                         .swipeActions {
-                            Button("削除", role: .destructive) { store.remove(video) }
+                            Button("削除", role: .destructive) { store.remove(video) }.disabled(store.busy)
                         }
                     }
                 }
                 Section {
-                    Text("同じ自宅Wi-FiでMacを起動して使用します。取得・保存する権限のある動画を扱ってください。転送中はアプリを開いたままにしてください。")
+                    NavigationLink("使用ライブラリとライセンス") {
+                        ScrollView {
+                            Text(licenseText).font(.caption).padding().textSelection(.enabled)
+                        }.navigationTitle("YouTubeKit")
+                    }
+                    Text("取得・保存する権限のある動画を使用してください。処理中はアプリを開いたままにしてください。長い動画は通信量・空き容量・電池を多く使います。")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("おうち動画保存")
-            .refreshable { await store.refresh(); store.scanVideos() }
-            .task(id: scenePhase) {
-                guard scenePhase == .active else { return }
-                while !Task.isCancelled {
-                    await store.refresh()
-                    do { try await Task.sleep(nanoseconds: 3_000_000_000) }
-                    catch { break }
-                }
-            }
-            .sheet(item: $selected, onDismiss: { store.scanVideos() }) { video in
-                MovieView(video: video)
-            }
+            .refreshable { store.scanVideos() }
+            .sheet(item: $selected, onDismiss: { store.scanVideos() }) { video in MovieView(video: video) }
             .alert("確認してください", isPresented: Binding(
                 get: { !store.message.isEmpty }, set: { if !$0 { store.message = "" } })) {
                     Button("閉じる") { store.message = "" }

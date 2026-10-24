@@ -1,59 +1,72 @@
-# おうち動画保存 — iPhone / iPadアプリ
+# おうち動画保存 — iPhone単体版 v1.1
 
-SwiftUIで作成したネイティブクライアントです。Macの既存サーバーへ接続し、YouTube動画URLの送信、処理履歴・進捗の表示、完成MP4のiPhoneへの転送、端末内での再生・区間切り取りができます。iOS / iPadOS 16以降が対象です。
+iPhone / iPad内でYouTube動画の取得・MP4保存・再生・区間切り取りを行うSwiftUIアプリです。利用時はMac、外付けSSD、自宅Wi-Fi、接続キー、変換サーバーを必要としません。インターネット接続とiPhone本体の空き容量が必要です。
 
-## MacでビルドしてiPhoneへインストール
+## 変更内容
 
-1. MacにAppleのXcodeをインストールします：https://developer.apple.com/xcode/
-2. リポジトリを更新します。
+- Mac接続欄、接続キー、サーバーAPI呼び出し、履歴ポーリングを削除しました。
+- YouTubeKit 0.4.9（MIT）をSwift Package Managerで組み込み、`methods: [.local]` を指定しています。外部抽出サービスへのremote fallbackは使用しません。
+- URLから動画IDを検証し、指定上限以下で端末が再生可能なMP4映像を選択します。
+- 映像・音声が同じファイルなら両トラックを検証してMP4保存します。
+- 映像・音声が別々の場合は、それぞれを取得し、Apple AVFoundationで結合・再エンコードしてMP4を書き出します。
+- キャンセルボタン、転送段階の進捗、書き出し中の表示を用意しました。再エンコード中の割合・完了予想時間は表示しません。
+- ローカルネットワーク利用権限とATSのHTTP制限緩和を削除しました。
+
+YouTubeへのアクセス自体はインターネット経由です。「単体」は抽出・結合・保存の処理場所がiPhoneである意味で、YouTubeからの取得までオフラインでできる意味ではありません。
+
+## インストール
+
+iOS / iPadOS 16以降、Xcode 15以降（依存ライブラリはSwift 5.9以降）が対象です。対応するOS・Xcodeの組み合わせでビルドしてください。
+
+現在提供しているのはソースプロジェクトです。署名済みIPAやTestFlight配布は未作成です。初回ビルド・インストールにはMacのXcodeと自分のApple Accountを使います。インストール後の動画処理ではMacは不要です。
 
 ```bash
 git pull --ff-only
 open ios/YouTubeMP4/YouTubeMP4.xcodeproj
 ```
 
-3. Xcodeの「Settings → Accounts」に自分のApple Accountを追加します。
-4. プロジェクト内のTARGETS → YouTubeMP4 → Signing & Capabilitiesで、自分のTeamを選びます。Bundle Identifierが競合する場合は自分専用の値へ変更します。
-5. iPhoneをMacへ接続して信頼し、Xcodeの実行先として選択します。端末で開発者モードの許可を求められた場合は、設定の案内に従います。
-6. Xcodeの実行ボタン（▶）でビルド・インストールします。署名や端末側の信頼設定が要求されたら、XcodeとiPhoneの表示に従います。
+1. XcodeがYouTubeKitパッケージを取得するのを待ちます。
+2. TARGETS → YouTubeMP4 → Signing & Capabilitiesで自分のTeamを選択します。必要ならBundle Identifierを自分専用の値に変更します。
+3. iPhoneを接続して実行先に選択し、▶でビルド・インストールします。端末の信頼や開発者モードの案内が出た場合は従います。
 
-これはXcodeから個人端末へ入れるソースプロジェクトです。署名済みIPA、TestFlight配布、App Store公開は行っていません。署名の有効期間・再署名要否は使うApple Accountや配布方式によります。
+ソースを変更しただけでは、すでにインストールしたアプリは更新されません。再ビルド・インストールしてください。同じBundle Identifierで更新すれば保存領域を継続利用できる構成ですが、アプリ削除時には保存データも削除されます。
 
 ## 使い方
 
-1. SSDを接続し、Macで `bash start.command` を起動します。
-2. iPhoneを同じWi-Fiへ接続します。
-3. Macが表示した `http://192.168.…:ポート/?key=…` をiPhoneアプリの接続欄に貼り付けます。ポートが8766などになった場合も、そのURLを使います。
-4. 「接続する」を押し、ローカルネットワークへのアクセスを許可します。
-5. YouTube動画URLと画質を指定し、「Macで取得を開始」を押します。
-6. Mac側が完了したら「iPhoneに保存」を押します。転送中はアプリを開いたままにしてください。
-7. 「iPhoneに保存した動画」から開くと再生できます。Macへ接続していなくても保存済み動画は再生できます。
-8. 再生画面のスライダー、現在位置ボタン、秒数入力で開始・終了を設定し、「選択区間を別のMP4に保存」を押します。
-9. 「ファイルに保存・共有」から共有メニューを開きます。切り取ったMP4も別のファイルとして共有できます。
+1. アプリへ単体のYouTube動画URLを貼り付けます。通常のwatch URL、youtu.be、Shortsなどに対応します。
+2. 画質上限（360p / 720p / 1080p）を選びます。
+3. 「iPhoneで取得・MP4保存」を押します。
+4. 完了後に「保存した動画」から再生します。
+5. 再生画面で開始・終了位置を選び、別のMP4へ切り取れます。
+6. 「ファイルに保存・共有」でファイルアプリ等へ書き出せます。
 
-動画はアプリのDocuments内に保存されます。ファイルアプリの「このiPhone内 → おうち動画保存」からアクセスできる構成です。切り取り動画は再生画面を閉じると一覧へ反映されます。一覧を下に引いて更新することもできます。削除は一覧を左へスワイプします。Macにあるコピーは別管理です。
+処理中はアプリを開いたままにしてください。取得処理中は自動ロックを抑止し、終了後に元の設定へ戻します。ホーム画面へ移動した場合や画面をロックした場合の完了保証・自動再開は実装していません。
 
-## 接続・保存の仕様
+## 制限
 
-- サーバーAPIは既存の `/api/jobs`、`/download/ジョブID` を利用します。Webアプリと同じMacサーバーを使います。
-- サーバーで使用中のポートを自動回避する既存機能にも対応します。Macを再起動した場合は新しい接続URLを貼り直します。
-- 接続キーはアプリの実行中だけ保持し、UserDefaultsやファイルへ保存しません。再起動時は接続URLの入力が必要です。
-- 接続はプライベートIPv4（10.x、172.16〜31.x、192.168.x）または `.local` 名だけ受け付けます。IPv6アドレスの直接入力には未対応です。
-- 自宅HTTPサーバーに接続するためATSのHTTP制限を緩和しています。通信自体は暗号化されません。URL入力はアプリ内で上記の接続先に制限します。
-- Macでの取得処理はiPhoneアプリを閉じても続きます。iPhoneへの転送と切り取りは前面実行を想定しており、バックグラウンド継続・中断からの再開には対応していません。
-- ダウンロードを一時ファイルからDocumentsへ移動するため、iPhoneにも元動画相当の空き容量が必要です。切り取り時は書き出す分の追加容量が必要です。
-- 切り取りはApple AVFoundationで再エンコードします。元動画を上書きしません。音声・映像の境界は媒体の時間精度に従い、形式や素材によって書き出しが失敗する場合があります。
-- iPhoneの写真アプリへの専用保存ボタン、共有拡張、サムネイル一覧、自動接続、複数区間結合は未実装です。
+- YouTubeKitは非公式の抽出ライブラリです。公開動画でもYouTube側の仕様変更・地域・接続環境・HTTP 403などで取得できない場合があります。取得失敗時に外部変換サーバーへ切り替えません。
+- ログイン、Cookie取り込み、有料・非公開・年齢制限動画やアクセス制限の回避には対応しません。配信中ライブと再生リストの一括取得も対象外です。
+- 画質は上限です。指定した解像度の取得を保証しません。対応形式がなければエラーにします。
+- 開始前の空き容量は1GiB以上を目安にチェックしますが、必要量を保証するものではありません。映像＋音声＋完成MP4の合計容量が必要です。切り取りは追加ファイルを作ります。
+- 取得ファイルは個別に2GiBまでです。サーバーの上限とは別の端末内制限です。上限超過で転送をキャンセルした場合、通信中断として表示されることがあります。
+- 同時処理は1件です。未完了のダウンロードの再開・キューの永続化は未実装です。
+- 完成動画はアプリのDocumentsに保存します。一時データは処理終了時に片付けますが、OSがアプリを強制終了した場合は一時ファイルが残る場合があります。
+- ファイルアプリの「このiPhone内 → おうち動画保存」へ公開する設定です。写真アプリ専用の保存ボタンや共有拡張は未実装です。
+- 元のMac版Webアプリは別機能として残っています。iPhone単体版からは呼び出しません。
 
-## 検証と未確認事項
+## 検証範囲
 
-Swift構文パーサーによる構文検査、Info.plistと共有スキームの読み込み、Xcodeプロジェクト内参照の整合性検査は合格しました。既存Macサーバーのテスト8件も合格しています。これらはSwiftの型チェックやiOSビルドの代わりにはなりません。
+作成環境にはXcodeとiOS SDKがありません。Swift構文検査、Info.plist・共有スキーム読み込み、XcodeプロジェクトとSwift Package Managerの参照整合性を確認します。これらはSwiftの型チェック・Apple SDKでのビルド・実機検証の代替にはなりません。
 
-作成環境はLinuxでXcode・iOS SDKがありません。Xcodeプロジェクトとソースを作成していますが、iOSアプリのビルド、署名、iPhone・iPad実機の通信・再生・書き出しは未確認です。動作保証済みのバイナリーではありません。最初に上記のXcodeビルド・実機確認を行ってください。
+GitHub Actionsに署名不要のiOS Simulatorビルドを追加しています。実行結果はリポジトリのActionsで確認できます。実機のYouTube取得・音声付きMP4保存・再生・切り取りが成功したことは、まだ確認していません。
 
-## Apple公式資料
+## 使用ライブラリと一次資料
 
+- YouTubeKit：https://github.com/alexeichhorn/YouTubeKit/tree/0.4.9
+- YouTubeKit MITライセンス：アプリ内「使用ライブラリとライセンス」に表示し、ソースにも同梱しています。
+- Apple動画プレーヤー：https://developer.apple.com/documentation/avkit/videoplayer
+- Apple動画書き出し：https://developer.apple.com/documentation/avfoundation/avassetexportsession
 - Xcode：https://developer.apple.com/xcode/
-- 動画プレーヤー：https://developer.apple.com/documentation/avkit/videoplayer
-- 動画書き出し：https://developer.apple.com/documentation/avfoundation/avassetexportsession
-- ローカルネットワーク権限：https://developer.apple.com/documentation/bundleresources/information-property-list/nslocalnetworkusagedescription
+- YouTube利用条件：https://www.youtube.com/static?template=terms
+
+取得・保存する権限とYouTubeの利用条件を確認した動画に使用してください。
