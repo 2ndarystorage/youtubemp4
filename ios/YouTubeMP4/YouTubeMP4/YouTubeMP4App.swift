@@ -19,6 +19,35 @@ struct ServiceError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+@MainActor
+enum MP4Exporter {
+    static func run(_ session: AVAssetExportSession, to output: URL) async throws {
+        try Task.checkCancellation()
+        if #available(iOS 18.0, *) {
+            try await session.export(to: output, as: .mp4)
+        } else {
+            try await legacyExport(session, to: output)
+        }
+        try Task.checkCancellation()
+    }
+
+    @available(iOS, introduced: 16.0, obsoleted: 18.0)
+    private static func legacyExport(_ session: AVAssetExportSession, to output: URL) async throws {
+        session.outputURL = output
+        session.outputFileType = .mp4
+        try await withTaskCancellationHandler(operation: {
+            try Task.checkCancellation()
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                session.exportAsynchronously { continuation.resume() }
+            }
+            try Task.checkCancellation()
+            guard session.status == .completed else {
+                throw session.error ?? ServiceError(message: "MP4の書き出しに失敗しました。")
+            }
+        }, onCancel: { session.cancelExport() })
+    }
+}
+
 // Download progress is delivered by URLSession off the main thread.
 final class TransferProgress: NSObject, URLSessionDownloadDelegate {
     let report: @Sendable (Double?) -> Void
@@ -44,7 +73,6 @@ final class VideoStore: ObservableObject {
     @Published var fraction: Double?
     @Published var message = ""
     private var operation: Task<Void, Never>?
-    private var exporter: AVAssetExportSession?
     private let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 60
@@ -93,7 +121,7 @@ final class VideoStore: ObservableObject {
         do { try FileManager.default.removeItem(at: video.url); scanVideos() }
         catch { message = error.localizedDescription }
     }
-    func cancel() { operation?.cancel(); exporter?.cancelExport() }
+    func cancel() { operation?.cancel() }
 
     func start(url: String, height: Int) {
         guard !busy else { return }
@@ -136,21 +164,9 @@ final class VideoStore: ObservableObject {
               session.supportedFileTypes.contains(.mp4) else {
             throw ServiceError(message: "この映像・音声の組み合わせはMP4へ書き出せません。")
         }
-        exporter = session
-        defer { exporter = nil }
-        session.outputURL = output
-        session.outputFileType = .mp4
         session.shouldOptimizeForNetworkUse = true
         status = "iPhone内でMP4を書き出しています"; fraction = nil
-        await withTaskCancellationHandler(operation: {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                session.exportAsynchronously { continuation.resume() }
-            }
-        }, onCancel: { session.cancelExport() })
-        try Task.checkCancellation()
-        guard session.status == .completed else {
-            throw session.error ?? ServiceError(message: "MP4の書き出しに失敗しました。")
-        }
+        try await MP4Exporter.run(session, to: output)
     }
 
     private func merge(video: URL, audio: URL, to output: URL) async throws {
@@ -310,7 +326,7 @@ struct MovieView: View {
     @State private var start: Double = 0
     @State private var end: Double = 0
     @State private var exporting = false
-    @State private var exportSession: AVAssetExportSession?
+    @State private var exportTask: Task<Void, Never>?
     @State private var result: URL?
     @State private var error = ""
     @Environment(\.dismiss) private var dismiss
@@ -333,7 +349,7 @@ struct MovieView: View {
                         }
                         TextField("開始（秒）", value: $start, format: .number).keyboardType(.decimalPad)
                         TextField("終了（秒）", value: $end, format: .number).keyboardType(.decimalPad)
-                        Button(exporting ? "書き出し中…" : "選択区間を別のMP4に保存") { Task { await trim() } }
+                        Button(exporting ? "書き出し中…" : "選択区間を別のMP4に保存") { exportTask = Task { await trim() } }
                             .disabled(exporting || !validRange)
                     } else { Text("動画の長さを確認中…") }
                     if exporting { ProgressView() }
@@ -355,7 +371,7 @@ struct MovieView: View {
                     duration = time.seconds; end = duration
                 } catch { self.error = error.localizedDescription }
             }
-            .onDisappear { player?.pause(); exportSession?.cancelExport() }
+            .onDisappear { player?.pause(); exportTask?.cancel() }
         }
     }
 
@@ -366,25 +382,22 @@ struct MovieView: View {
     @MainActor private func trim() async {
         guard validRange, !exporting else { return }
         exporting = true; error = ""; result = nil; player?.pause()
-        defer { exporting = false; exportSession = nil }
+        defer { exporting = false; exportTask = nil }
         let asset = AVURLAsset(url: video.url)
         guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality),
               session.supportedFileTypes.contains(.mp4) else {
             error = "この動画はMP4の切り取りに対応していません。"; return
         }
-        exportSession = session
         let output = VideoStore.documents.appendingPathComponent("切り取り-\(UUID().uuidString).mp4")
-        session.outputURL = output; session.outputFileType = .mp4
         session.shouldOptimizeForNetworkUse = true
         session.timeRange = CMTimeRange(start: CMTime(seconds: start, preferredTimescale: 600),
                                        duration: CMTime(seconds: end - start, preferredTimescale: 600))
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            session.exportAsynchronously { continuation.resume() }
-        }
-        if session.status == .completed { result = output }
-        else {
+        do {
+            try await MP4Exporter.run(session, to: output)
+            result = output
+        } catch {
             try? FileManager.default.removeItem(at: output)
-            error = session.error?.localizedDescription ?? "書き出しが中断されました。アプリを開いたままで再試行してください。"
+            self.error = error.localizedDescription
         }
     }
 }
