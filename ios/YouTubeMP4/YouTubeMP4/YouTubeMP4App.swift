@@ -35,6 +35,7 @@ enum MP4Exporter {
     private static func legacyExport(_ session: AVAssetExportSession, to output: URL) async throws {
         session.outputURL = output
         session.outputFileType = .mp4
+        let cancellation = LegacyCancellation(session)
         try await withTaskCancellationHandler(operation: {
             try Task.checkCancellation()
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -44,7 +45,14 @@ enum MP4Exporter {
             guard session.status == .completed else {
                 throw session.error ?? ServiceError(message: "MP4の書き出しに失敗しました。")
             }
-        }, onCancel: { session.cancelExport() })
+        }, onCancel: { Task { await cancellation.cancel() } })
+    }
+
+    @available(iOS, introduced: 16.0, obsoleted: 18.0)
+    @MainActor private final class LegacyCancellation {
+        let session: AVAssetExportSession
+        init(_ session: AVAssetExportSession) { self.session = session }
+        func cancel() { session.cancelExport() }
     }
 }
 
