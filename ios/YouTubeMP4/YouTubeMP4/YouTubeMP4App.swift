@@ -339,6 +339,7 @@ struct HomeView: View {
     @StateObject private var store = VideoStore()
     @State private var youtubeURL = ""
     @State private var height = 720
+    @FocusState private var urlFieldFocused: Bool
     @State private var selected: LocalVideo?
     private var licenseText: String {
         guard let url = Bundle.main.url(forResource: "YouTubeKit-LICENSE", withExtension: "txt"),
@@ -354,15 +355,30 @@ struct HomeView: View {
                     Text("URLの取得からMP4保存まで、この端末で処理します。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Section("YouTubeから取得") {
-                    TextField("YouTubeの動画URL", text: $youtubeURL)
-                        .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                Section("動画を取得") {
+                    TextField("YouTubeのURLを貼り付け", text: $youtubeURL)
+                        .keyboardType(.URL).textContentType(.URL)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        .focused($urlFieldFocused).submitLabel(.done)
+                        .onSubmit { urlFieldFocused = false }
+                        .accessibilityLabel("YouTubeのURL")
+                        .accessibilityIdentifier("youtubeURLField")
                         .disabled(store.busy)
                     Picker("画質の上限", selection: $height) {
                         Text("360p").tag(360); Text("720p").tag(720); Text("1080p").tag(1080)
                     }.pickerStyle(.segmented).disabled(store.busy)
-                    Button("iPhoneで取得・MP4保存") { store.start(url: youtubeURL, height: height) }
-                        .disabled(store.busy || youtubeURL.isEmpty)
+                    Button {
+                        urlFieldFocused = false
+                        store.start(url: youtubeURL, height: height)
+                    } label: {
+                        Label(store.busy ? "iPhoneで取得中…" : "iPhoneで取得を開始",
+                              systemImage: "arrow.down.circle.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .accessibilityIdentifier("downloadOnIPhoneButton")
+                    .disabled(store.busy || youtubeURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 Section("処理状況") {
                     Text(store.status)
