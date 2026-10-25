@@ -17,4 +17,4 @@ jobs:
         run: |
           set -o pipefail
           SIMULATOR_ID=$(xcrun simctl list devices available --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for runtime,devices in d["devices"].items() if "iOS" in runtime for x in devices if "iPhone" in x["name"]))')
-          xcodebuild -project ios/YouTubeMP4/YouTubeMP4.xcodeproj -scheme YouTubeMP4 -configuration Debug -destination "platform=iOS Simulator,id=$SIMULATOR_ID" -parallel-testing-enabled NO -resultBundlePath /tmp/YouTubeMP4-tests -derivedDataPath /tmp/YouTubeMP4-build CODE_SIGNING_ALLOWED=NO test | tee /tmp/YouTubeMP4-build.log
+          xcodebuild -project ios/YouTubeMP4/YouTubeMP4.xcodeproj -scheme YouTubeMP4 -configuration Debug -destination "platform=iOS Simulator,id=$SIMULATOR_ID" -parallel-testing-enabled NO -resultBundlePath /tmp/YouTubeMP4-tests -derivedDataPath /tmp/YouTubeMP4-build CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES test | tee /tmp/YouTubeMP4-build.log
