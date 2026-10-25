@@ -36,13 +36,13 @@
 		};
 		"000000000000000000000004" = {
 			"isa" = "PBXGroup";
-			"children" = ("000000000000000000000007");
+			"children" = ("000000000000000000000007","0000000000000000000000C8");
 			"name" = "Products";
 			"sourceTree" = "<group>";
 		};
 		"000000000000000000000002" = {
 			"isa" = "PBXGroup";
-			"children" = ("000000000000000000000003","000000000000000000000004");
+			"children" = ("000000000000000000000003","000000000000000000000004","0000000000000000000000D2");
 			"sourceTree" = "<group>";
 		};
 		"000000000000000000000009" = {
@@ -86,6 +86,7 @@
 				"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
 				"DEBUG_INFORMATION_FORMAT" = "dwarf";
 				"SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "DEBUG";
+				"ENABLE_TESTABILITY" = "YES";
 			};
 		};
 		"000000000000000000000010" = {
@@ -111,6 +112,7 @@
 				"TARGETED_DEVICE_FAMILY" = "1,2";
 				"SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
 				"SWIFT_EMIT_LOC_STRINGS" = "YES";
+				"ENABLE_TESTABILITY" = "YES";
 			};
 		};
 		"000000000000000000000012" = {
@@ -153,7 +155,7 @@
 			"productRefGroup" = "000000000000000000000004";
 			"projectDirPath" = "";
 			"projectRoot" = "";
-			"targets" = ("00000000000000000000000C");
+			"targets" = ("00000000000000000000000C","0000000000000000000000DB");
 			"packageReferences" = ("000000000000000000000064");
 		};
 		"000000000000000000000064" = {
@@ -182,6 +184,143 @@
 		"000000000000000000000068" = {
 			"isa" = "PBXBuildFile";
 			"fileRef" = "000000000000000000000067";
+		};
+		"0000000000000000000000C8" = {
+			"isa" = "PBXFileReference";
+			"explicitFileType" = "wrapper.cfbundle";
+			"includeInIndex" = "0";
+			"path" = "YouTubeMP4Tests.xctest";
+			"sourceTree" = "BUILT_PRODUCTS_DIR";
+		};
+		"0000000000000000000000C9" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "RuntimeTests.swift";
+			"sourceTree" = "<group>";
+		};
+		"0000000000000000000000CA" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "0000000000000000000000C9";
+		};
+		"0000000000000000000000CB" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "file";
+			"path" = "video.mp4";
+			"sourceTree" = "<group>";
+		};
+		"0000000000000000000000CC" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "0000000000000000000000CB";
+		};
+		"0000000000000000000000CD" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "file";
+			"path" = "audio.m4a";
+			"sourceTree" = "<group>";
+		};
+		"0000000000000000000000CE" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "0000000000000000000000CD";
+		};
+		"0000000000000000000000CF" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "file";
+			"path" = "combined.mp4";
+			"sourceTree" = "<group>";
+		};
+		"0000000000000000000000D0" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "0000000000000000000000CF";
+		};
+		"0000000000000000000000D1" = {
+			"isa" = "PBXGroup";
+			"children" = ("0000000000000000000000CB","0000000000000000000000CD","0000000000000000000000CF");
+			"path" = "Fixtures";
+			"sourceTree" = "<group>";
+		};
+		"0000000000000000000000D2" = {
+			"isa" = "PBXGroup";
+			"children" = ("0000000000000000000000C9","0000000000000000000000D1");
+			"path" = "YouTubeMP4Tests";
+			"sourceTree" = "<group>";
+		};
+		"0000000000000000000000D3" = {
+			"isa" = "PBXSourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = ("0000000000000000000000CA");
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"0000000000000000000000D4" = {
+			"isa" = "PBXFrameworksBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = ();
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"0000000000000000000000D5" = {
+			"isa" = "PBXResourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = ("0000000000000000000000CC","0000000000000000000000CE","0000000000000000000000D0");
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"0000000000000000000000D6" = {
+			"isa" = "PBXContainerItemProxy";
+			"containerPortal" = "000000000000000000000001";
+			"proxyType" = "1";
+			"remoteGlobalIDString" = "00000000000000000000000C";
+			"remoteInfo" = "YouTubeMP4";
+		};
+		"0000000000000000000000D7" = {
+			"isa" = "PBXTargetDependency";
+			"target" = "00000000000000000000000C";
+			"targetProxy" = "0000000000000000000000D6";
+		};
+		"0000000000000000000000D8" = {
+			"isa" = "XCBuildConfiguration";
+			"name" = "Debug";
+			"buildSettings" = {
+				"BUNDLE_LOADER" = "$(TEST_HOST)";
+				"TEST_HOST" = "$(BUILT_PRODUCTS_DIR)/YouTubeMP4.app/YouTubeMP4";
+				"PRODUCT_BUNDLE_IDENTIFIER" = "com.akirashow.YouTubeMP4Tests";
+				"PRODUCT_NAME" = "$(TARGET_NAME)";
+				"GENERATE_INFOPLIST_FILE" = "YES";
+				"SWIFT_VERSION" = "5.0";
+				"IPHONEOS_DEPLOYMENT_TARGET" = "16.0";
+				"TARGETED_DEVICE_FAMILY" = "1,2";
+				"CODE_SIGN_STYLE" = "Automatic";
+				"ENABLE_TESTABILITY" = "YES";
+			};
+		};
+		"0000000000000000000000D9" = {
+			"isa" = "XCBuildConfiguration";
+			"name" = "Release";
+			"buildSettings" = {
+				"BUNDLE_LOADER" = "$(TEST_HOST)";
+				"TEST_HOST" = "$(BUILT_PRODUCTS_DIR)/YouTubeMP4.app/YouTubeMP4";
+				"PRODUCT_BUNDLE_IDENTIFIER" = "com.akirashow.YouTubeMP4Tests";
+				"PRODUCT_NAME" = "$(TARGET_NAME)";
+				"GENERATE_INFOPLIST_FILE" = "YES";
+				"SWIFT_VERSION" = "5.0";
+				"IPHONEOS_DEPLOYMENT_TARGET" = "16.0";
+				"TARGETED_DEVICE_FAMILY" = "1,2";
+				"CODE_SIGN_STYLE" = "Automatic";
+			};
+		};
+		"0000000000000000000000DA" = {
+			"isa" = "XCConfigurationList";
+			"buildConfigurations" = ("0000000000000000000000D8","0000000000000000000000D9");
+			"defaultConfigurationIsVisible" = "0";
+			"defaultConfigurationName" = "Release";
+		};
+		"0000000000000000000000DB" = {
+			"isa" = "PBXNativeTarget";
+			"name" = "YouTubeMP4Tests";
+			"productName" = "YouTubeMP4Tests";
+			"productReference" = "0000000000000000000000C8";
+			"productType" = "com.apple.product-type.bundle.unit-test";
+			"buildConfigurationList" = "0000000000000000000000DA";
+			"buildPhases" = ("0000000000000000000000D3","0000000000000000000000D4","0000000000000000000000D5");
+			"buildRules" = ();
+			"dependencies" = ("0000000000000000000000D7");
 		};
 	};
 	"rootObject" = "000000000000000000000001";

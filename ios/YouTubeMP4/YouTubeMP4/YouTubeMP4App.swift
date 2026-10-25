@@ -19,6 +19,35 @@ struct ServiceError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+// Candidates that can produce a movie with both picture and sound.
+struct MediaSource {
+    let url: URL
+    let hasVideo: Bool
+    let hasAudio: Bool
+    let resolution: Int
+    let bitrate: Int
+}
+
+struct DownloadPlan {
+    let video: MediaSource
+    let audio: MediaSource?
+}
+
+enum DownloadPlanner {
+    static func plans(_ sources: [MediaSource], maxHeight: Int) -> [DownloadPlan] {
+        let audio = sources.filter { $0.hasAudio && !$0.hasVideo }
+            .max { $0.bitrate < $1.bitrate }
+        return sources.filter {
+            $0.hasVideo && $0.resolution > 0 && $0.resolution <= maxHeight
+                && ($0.hasAudio || audio != nil)
+        }.sorted {
+            if $0.resolution != $1.resolution { return $0.resolution > $1.resolution }
+            if $0.hasAudio != $1.hasAudio { return $0.hasAudio }
+            return $0.bitrate > $1.bitrate
+        }.prefix(6).map { DownloadPlan(video: $0, audio: $0.hasAudio ? nil : audio) }
+    }
+}
+
 @MainActor
 enum MP4Exporter {
     static func run(_ session: AVAssetExportSession, to output: URL) async throws {
@@ -77,7 +106,10 @@ final class TransferProgress: NSObject, URLSessionDownloadDelegate {
 final class VideoStore: ObservableObject {
     @Published var videos: [LocalVideo] = []
     @Published var busy = false
-    @Published var status = "URLを貼り付けて開始してください"
+    @Published var diagnostics = ""
+    @Published var status = "URLを貼り付けて開始してください" {
+        didSet { record(status) }
+    }
     @Published var fraction: Double?
     @Published var message = ""
     private var operation: Task<Void, Never>?
@@ -93,6 +125,16 @@ final class VideoStore: ObservableObject {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
     init() { scanVideos() }
+
+    private func record(_ text: String) {
+        let line = "\(Date().formatted(date: .omitted, time: .standard)) \(text)"
+        diagnostics = (diagnostics.split(separator: "\n").map(String.init) + [line]).suffix(80).joined(separator: "\n")
+    }
+
+    private func diagnosticError(_ error: Error) -> String {
+        let e = error as NSError
+        return "\(e.domain) (\(e.code)): \(String(e.localizedDescription.prefix(500)))"
+    }
 
     static func videoID(from value: String) throws -> String {
         guard let parts = URLComponents(string: value.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -135,6 +177,8 @@ final class VideoStore: ObservableObject {
         guard !busy else { return }
         do {
             let id = try Self.videoID(from: url)
+            diagnostics = ""
+            record("アプリ v1.2 / iPhone単体処理 / 画質上限 \(height)p")
             busy = true
             operation = Task { await process(id: id, height: height) }
         } catch { message = error.localizedDescription }
@@ -147,7 +191,7 @@ final class VideoStore: ObservableObject {
         }
     }
 
-    private func download(_ url: URL, to destination: URL, label: String) async throws {
+    func download(_ url: URL, to destination: URL, label: String) async throws {
         guard url.scheme == "https" else { throw ServiceError(message: "取得元がHTTPSではありません。") }
         status = label; fraction = nil
         let delegate = TransferProgress { [weak self] progress in
@@ -156,8 +200,11 @@ final class VideoStore: ObservableObject {
         let (temp, response) = try await session.download(for: URLRequest(url: url), delegate: delegate)
         defer { try? FileManager.default.removeItem(at: temp) }
         try Task.checkCancellation()
-        guard let response = response as? HTTPURLResponse, (200...299).contains(response.statusCode) else {
-            throw ServiceError(message: "動画の取得が拒否されました。取得URLの期限切れやYouTube側の制限が考えられます。")
+        guard let response = response as? HTTPURLResponse else {
+            throw ServiceError(message: "動画の取得でHTTP応答を確認できませんでした。")
+        }
+        guard (200...299).contains(response.statusCode) else {
+            throw ServiceError(message: "動画の取得に失敗しました（HTTP \(response.statusCode)）。")
         }
         let size = try temp.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
         guard size > 0, size <= 2 * 1024 * 1024 * 1024 else {
@@ -177,7 +224,7 @@ final class VideoStore: ObservableObject {
         try await MP4Exporter.run(session, to: output)
     }
 
-    private func merge(video: URL, audio: URL, to output: URL) async throws {
+    func merge(video: URL, audio: URL, to output: URL) async throws {
         let videoAsset = AVURLAsset(url: video), audioAsset = AVURLAsset(url: audio)
         guard let videoTrack = try await videoAsset.loadTracks(withMediaType: .video).first,
               let audioTrack = try await audioAsset.loadTracks(withMediaType: .audio).first else {
@@ -199,6 +246,18 @@ final class VideoStore: ObservableObject {
         try await export(composition, to: output)
     }
 
+    func validateMovie(_ url: URL) async throws {
+        let asset = AVURLAsset(url: url)
+        let video = try await asset.loadTracks(withMediaType: .video)
+        let audio = try await asset.loadTracks(withMediaType: .audio)
+        let duration = try await asset.load(.duration)
+        let playable = try await asset.load(.isPlayable)
+        guard !video.isEmpty, !audio.isEmpty, playable,
+              duration.seconds.isFinite, duration.seconds > 0 else {
+            throw ServiceError(message: "保存したMP4の映像・音声・再生可能性を検証できませんでした。")
+        }
+    }
+
     private func process(id: String, height: Int) async {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let output = Self.documents.appendingPathComponent("YouTube-\(id)-\(UUID().uuidString).mp4")
@@ -217,42 +276,60 @@ final class VideoStore: ObservableObject {
             let youtube = YouTube(videoID: id, methods: [.local])
             let streams = try await youtube.streams
             try Task.checkCancellation()
-            let videoStreams = streams.filter {
-                $0.fileExtension == .mp4 && $0.isNativelyPlayable && $0.includesVideoTrack
-                    && ($0.videoResolution ?? Int.max) <= height
-            }.sorted { ($0.videoResolution ?? 0) > ($1.videoResolution ?? 0) }
-            guard let chosen = videoStreams.first else {
-                throw ServiceError(message: "指定画質以下の対応MP4が見つかりません。別の画質または動画を試してください。")
+            let sources = streams.filter {
+                $0.isNativelyPlayable && ($0.fileExtension == .mp4 || $0.fileExtension == .m4a)
+            }.map {
+                MediaSource(url: $0.url, hasVideo: $0.includesVideoTrack,
+                            hasAudio: $0.includesAudioTrack, resolution: $0.videoResolution ?? 0,
+                            bitrate: $0.bitrate ?? 0)
             }
-            let v = folder.appendingPathComponent("video.mp4")
-            try await download(chosen.url, to: v, label: "映像を取得中（\(chosen.videoResolution ?? 0)p）")
-            if chosen.includesVideoAndAudioTrack {
-                let asset = AVURLAsset(url: v)
-                let tracks = try await asset.loadTracks(withMediaType: .video)
-                let audio = try await asset.loadTracks(withMediaType: .audio)
-                guard !tracks.isEmpty, !audio.isEmpty else {
-                    throw ServiceError(message: "取得ファイルに映像または音声がありません。")
-                }
+            let plans = DownloadPlanner.plans(sources, maxHeight: height)
+            record("抽出 \(streams.count)件 / 音声付きで保存可能な候補 \(plans.count)件")
+            guard !plans.isEmpty else {
+                throw ServiceError(message: "指定画質以下で映像と音声を保存できる形式がありません。別の画質または動画を試してください。")
+            }
+            var lastError: Error = ServiceError(message: "対応する取得元がありません。")
+            var completed = false
+            for (index, plan) in plans.enumerated() {
                 try Task.checkCancellation()
-                try FileManager.default.moveItem(at: v, to: output)
-            } else {
-                guard let audio = streams.filter({
-                    $0.includesAudioTrack && !$0.includesVideoTrack && $0.isNativelyPlayable
-                        && ($0.fileExtension == .m4a || $0.fileExtension == .mp4)
-                }).max(by: { ($0.bitrate ?? 0) < ($1.bitrate ?? 0) }) else {
-                    throw ServiceError(message: "対応する音声が見つかりません。無音の動画は保存しません。")
+                let attempt = folder.appendingPathComponent("attempt-\(index)", isDirectory: true)
+                try FileManager.default.createDirectory(at: attempt, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: attempt) }
+                do {
+                    status = "候補 \(index + 1)/\(plans.count) を確認中"
+                    let v = attempt.appendingPathComponent("video.mp4")
+                    try await download(plan.video.url, to: v, label: "映像を取得中（\(plan.video.resolution)p）")
+                    if let audio = plan.audio {
+                        let a = attempt.appendingPathComponent("audio.m4a")
+                        try await download(audio.url, to: a, label: "音声を取得中")
+                        try await merge(video: v, audio: a, to: output)
+                    } else {
+                        try await validateMovie(v)
+                        try Task.checkCancellation()
+                        try FileManager.default.moveItem(at: v, to: output)
+                    }
+                    status = "保存したMP4を検証しています"
+                    try await validateMovie(output)
+                    completed = true
+                    break
+                } catch {
+                    try? FileManager.default.removeItem(at: output)
+                    if Task.isCancelled { throw CancellationError() }
+                    record("候補 \(index + 1) 失敗: \(diagnosticError(error))")
+                    lastError = error
                 }
-                let a = folder.appendingPathComponent("audio.m4a")
-                try await download(audio.url, to: a, label: "音声を取得中")
-                try await merge(video: v, audio: a, to: output)
             }
+            guard completed else { throw lastError }
             scanVideos(); status = "MP4をiPhoneに保存しました"
         } catch {
             try? FileManager.default.removeItem(at: output)
             if Task.isCancelled { status = "中止しました" }
             else {
+                let failedStage = status
+                record(diagnosticError(error))
                 status = "取得・変換に失敗しました"
-                message = error.localizedDescription + "\n公開動画でも取得できない場合があります。通信・空き容量・ライブラリの対応状況をご確認ください。"
+                message = "失敗した段階: \(failedStage)\n" + error.localizedDescription
+                    + "\n「診断ログを共有」から詳細を確認できます。"
             }
         }
     }
@@ -289,6 +366,12 @@ struct HomeView: View {
                 }
                 Section("処理状況") {
                     Text(store.status)
+                    if !store.diagnostics.isEmpty {
+                        ShareLink(item: store.diagnostics) { Label("診断ログを共有", systemImage: "square.and.arrow.up") }
+                        DisclosureGroup("診断の詳細") {
+                            Text(store.diagnostics).font(.caption.monospaced()).textSelection(.enabled)
+                        }
+                    }
                     if store.busy {
                         if let fraction = store.fraction { ProgressView(value: fraction) }
                         else { ProgressView() }

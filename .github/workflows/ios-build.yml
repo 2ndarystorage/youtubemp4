@@ -1,4 +1,4 @@
-name: iOS simulator build
+name: iOS simulator runtime tests
 on:
   push:
     branches: [main]
@@ -13,7 +13,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Build standalone iPhone app
+      - name: Test standalone iPhone app
         run: |
           set -o pipefail
-          xcodebuild -project ios/YouTubeMP4/YouTubeMP4.xcodeproj -scheme YouTubeMP4 -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath /tmp/YouTubeMP4-build CODE_SIGNING_ALLOWED=NO build | tee /tmp/YouTubeMP4-build.log
+          SIMULATOR_ID=$(xcrun simctl list devices available --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for runtime,devices in d["devices"].items() if "iOS" in runtime for x in devices if "iPhone" in x["name"]))')
+          xcodebuild -project ios/YouTubeMP4/YouTubeMP4.xcodeproj -scheme YouTubeMP4 -configuration Debug -destination "platform=iOS Simulator,id=$SIMULATOR_ID" -parallel-testing-enabled NO -resultBundlePath /tmp/YouTubeMP4-tests -derivedDataPath /tmp/YouTubeMP4-build CODE_SIGNING_ALLOWED=NO test | tee /tmp/YouTubeMP4-build.log
