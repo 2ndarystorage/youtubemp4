@@ -1,5 +1,7 @@
 import SwiftUI
 import AVKit
+import Photos
+import Combine
 import UniformTypeIdentifiers
 import YouTubeKit
 
@@ -103,7 +105,24 @@ final class TransferProgress: NSObject, URLSessionDownloadDelegate {
 }
 
 @MainActor
+enum PhotosVideoSaver {
+    static func save(_ url: URL) async throws {
+        let current = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+        let access = current == .notDetermined
+            ? await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+            : current
+        guard access == .authorized || access == .limited else {
+            throw ServiceError(message: "写真への追加が許可されていません。設定で「おうち動画保存」の写真へのアクセスを許可してください。")
+        }
+        try await PHPhotoLibrary.shared().performChanges {
+            PHAssetCreationRequest.forAsset().addResource(with: .video, fileURL: url, options: nil)
+        }
+    }
+}
+
+@MainActor
 final class VideoStore: ObservableObject {
+    let downloadCompleted = PassthroughSubject<LocalVideo, Never>()
     @Published var videos: [LocalVideo] = []
     @Published var busy = false
     @Published var diagnostics = ""
@@ -321,6 +340,7 @@ final class VideoStore: ObservableObject {
             }
             guard completed else { throw lastError }
             scanVideos(); status = "MP4をiPhoneに保存しました"
+            downloadCompleted.send(LocalVideo(url: output))
         } catch {
             try? FileManager.default.removeItem(at: output)
             if Task.isCancelled { status = "中止しました" }
@@ -417,6 +437,7 @@ struct HomeView: View {
             }
             .navigationTitle("おうち動画保存")
             .refreshable { store.scanVideos() }
+            .onReceive(store.downloadCompleted) { selected = $0 }
             .sheet(item: $selected, onDismiss: { store.scanVideos() }) { video in MovieView(video: video) }
             .alert("確認してください", isPresented: Binding(
                 get: { !store.message.isEmpty }, set: { if !$0 { store.message = "" } })) {
@@ -430,9 +451,19 @@ struct MovieView: View {
     let video: LocalVideo
     @State private var player: AVPlayer?
     @State private var duration: Double = 0
-    @State private var start: Double = 0
-    @State private var end: Double = 0
+    @State private var startText = "0"
+    @State private var endText = "0"
+
+    private var start: Double { Double(startText.replacingOccurrences(of: ",", with: ".")) ?? .nan }
+    private var end: Double { Double(endText.replacingOccurrences(of: ",", with: ".")) ?? .nan }
+
+    private func slider(_ text: Binding<String>, value: Double) -> Binding<Double> {
+        Binding(get: { value.isFinite ? min(duration, max(0, value)) : 0 },
+                set: { text.wrappedValue = String($0) })
+    }
     @State private var exporting = false
+    @State private var savingToPhotos = false
+    @State private var savedToPhotos: Set<URL> = []
     @State private var exportTask: Task<Void, Never>?
     @State private var result: URL?
     @State private var error = ""
@@ -442,40 +473,58 @@ struct MovieView: View {
         NavigationStack {
             Form {
                 Section { VideoPlayer(player: player).frame(height: 230) }
-                Section("元動画") { ShareLink(item: video.url) { Label("ファイルに保存・共有", systemImage: "square.and.arrow.up") } }
+                Section("元動画") {
+                    photoButton(for: video.url, title: "元動画を写真に保存")
+                    ShareLink(item: video.url) { Label("ファイルに保存・共有", systemImage: "square.and.arrow.up") }
+                }.disabled(exporting || savingToPhotos)
                 Section("切り取り（元動画は残ります）") {
                     if duration > 0 {
                         Text("開始 \(start, specifier: "%.1f") 秒 / 終了 \(end, specifier: "%.1f") 秒")
-                        Slider(value: $start, in: 0...duration, step: 0.1).accessibilityLabel("開始位置")
+                        Slider(value: slider($startText, value: start), in: 0...duration, step: 0.1).accessibilityLabel("開始位置")
                         Button("現在の再生位置を開始に設定") {
-                            start = min(duration, max(0, player?.currentTime().seconds ?? 0))
+                            startText = String(min(duration, max(0, player?.currentTime().seconds ?? 0)))
                         }
-                        Slider(value: $end, in: 0...duration, step: 0.1).accessibilityLabel("終了位置")
+                        Slider(value: slider($endText, value: end), in: 0...duration, step: 0.1).accessibilityLabel("終了位置")
                         Button("現在の再生位置を終了に設定") {
-                            end = min(duration, max(0, player?.currentTime().seconds ?? duration))
+                            endText = String(min(duration, max(0, player?.currentTime().seconds ?? duration)))
                         }
-                        TextField("開始（秒）", value: $start, format: .number).keyboardType(.decimalPad)
-                        TextField("終了（秒）", value: $end, format: .number).keyboardType(.decimalPad)
+                        LabeledContent("開始（秒）") {
+                            TextField("開始（秒）", text: $startText).keyboardType(.decimalPad)
+                        }
+                        LabeledContent("終了（秒）") {
+                            TextField("終了（秒）", text: $endText).keyboardType(.decimalPad)
+                        }
+                        Button("開始位置を確認") {
+                            player?.pause()
+                            player?.seek(to: CMTime(seconds: start, preferredTimescale: 600),
+                                         toleranceBefore: .zero, toleranceAfter: .zero)
+                        }.disabled(!validRange)
+                        Button("切り取って写真に保存") {
+                            exportTask = Task { await trim(saveToPhotos: true) }
+                        }.disabled(exporting || !validRange)
                         Button(exporting ? "書き出し中…" : "選択区間を別のMP4に保存") { exportTask = Task { await trim() } }
                             .disabled(exporting || !validRange)
                     } else { Text("動画の長さを確認中…") }
                     if exporting { ProgressView() }
                     if let result {
                         Label("切り取り動画を保存しました", systemImage: "checkmark.circle")
+                        photoButton(for: result, title: "切り取り動画を写真に保存")
                         ShareLink(item: result) { Text("切り取り動画を共有・ファイルに保存") }
                     }
                     if !error.isEmpty { Text(error).foregroundStyle(.red) }
-                }.disabled(exporting)
+                    else if !validRange && duration > 0 { Text("0秒以上で、終了を開始より後、動画の長さ以内にしてください。").font(.caption).foregroundStyle(.secondary) }
+                }.disabled(exporting || savingToPhotos)
+                if savingToPhotos { ProgressView("写真に保存中…") }
             }
             .navigationTitle("再生・切り取り").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("閉じる") { dismiss() }.disabled(exporting) } }
-            .interactiveDismissDisabled(exporting)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("閉じる") { dismiss() }.disabled(exporting || savingToPhotos) } }
+            .interactiveDismissDisabled(exporting || savingToPhotos)
             .task {
                 player = AVPlayer(url: video.url)
                 do {
                     let time = try await AVURLAsset(url: video.url).load(.duration)
                     guard time.seconds.isFinite, time.seconds > 0 else { throw ServiceError(message: "動画の長さを読み取れません。") }
-                    duration = time.seconds; end = duration
+                    duration = time.seconds; endText = String(duration)
                 } catch { self.error = error.localizedDescription }
             }
             .onDisappear { player?.pause(); exportTask?.cancel() }
@@ -486,7 +535,28 @@ struct MovieView: View {
         start.isFinite && end.isFinite && start >= 0 && end <= duration && end > start
     }
 
-    @MainActor private func trim() async {
+    private func photoButton(for url: URL, title: String) -> some View {
+        Button {
+            Task { await saveToPhotos(url) }
+        } label: {
+            Label(savedToPhotos.contains(url) ? "写真に保存済み" : title,
+                  systemImage: savedToPhotos.contains(url) ? "checkmark.circle" : "photo.on.rectangle")
+        }.disabled(savedToPhotos.contains(url) || savingToPhotos)
+    }
+
+    @MainActor private func saveToPhotos(_ url: URL) async {
+        guard !savingToPhotos, !savedToPhotos.contains(url) else { return }
+        savingToPhotos = true; error = ""
+        defer { savingToPhotos = false }
+        do {
+            try await PhotosVideoSaver.save(url)
+            savedToPhotos.insert(url)
+        } catch {
+            self.error = "写真に保存できませんでした。\n" + error.localizedDescription
+        }
+    }
+
+    @MainActor private func trim(saveToPhotos shouldSave: Bool = false) async {
         guard validRange, !exporting else { return }
         exporting = true; error = ""; result = nil; player?.pause()
         defer { exporting = false; exportTask = nil }
@@ -502,6 +572,7 @@ struct MovieView: View {
         do {
             try await MP4Exporter.run(session, to: output)
             result = output
+            if shouldSave { await saveToPhotos(output) }
         } catch {
             try? FileManager.default.removeItem(at: output)
             self.error = error.localizedDescription
