@@ -46,13 +46,21 @@ enum DownloadPlanner {
 
 @MainActor
 enum MP4Exporter {
-    static func run(_ session: AVAssetExportSession, to output: URL) async throws {
+    static func run(_ session: AVAssetExportSession, to output: URL, reportProgress: (@Sendable (Double) -> Void)? = nil) async throws {
         try Task.checkCancellation()
+        let poller = Task {
+            while !Task.isCancelled {
+                reportProgress?(Double(session.progress))
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+        defer { poller.cancel() }
         if #available(iOS 18.0, *) {
             try await session.export(to: output, as: .mp4)
         } else {
             try await legacyExport(session, to: output)
         }
+        reportProgress?(1)
         try Task.checkCancellation()
     }
 
@@ -123,6 +131,9 @@ final class VideoStore: ObservableObject {
         didSet { record(status) }
     }
     @Published var fraction: Double?
+    @Published var startedAt: Date?
+    @Published var etaSeconds: Double?
+    private var progressSamples: [(date: Date, value: Double)] = []
     @Published var message = ""
     private var operation: Task<Void, Never>?
     private let session: URLSession = {
@@ -174,13 +185,47 @@ final class VideoStore: ObservableObject {
 
     func cancel() { operation?.cancel() }
 
+    /// Overall 0...1 progress across every phase (fraction is reused as the
+    /// overall value); derives a smoothed ETA from the progress rate over
+    /// the last ~20 seconds.
+    func setOverall(_ value: Double) {
+        let v = min(max(value, 0), 1)
+        fraction = v
+        let now = Date()
+        progressSamples.append((now, v))
+        progressSamples.removeAll { now.timeIntervalSince($0.date) > 20 }
+        if let first = progressSamples.first, progressSamples.count > 1 {
+            let dt = now.timeIntervalSince(first.date)
+            let dv = v - first.value
+            if dt >= 3, dv > 0.005, v > 0.03, v < 0.999 {
+                etaSeconds = (1 - v) / (dv / dt)
+            }
+        }
+    }
+
+    func elapsedText(at now: Date = Date()) -> String {
+        guard let startedAt else { return "0:00" }
+        let s = max(0, Int(now.timeIntervalSince(startedAt)))
+        return String(format: "%d:%02d", s / 60, s % 60)
+    }
+
+    var etaText: String? {
+        guard let etaSeconds, etaSeconds.isFinite, etaSeconds > 0 else { return nil }
+        if etaSeconds < 55 { return "残り約\(Int(etaSeconds.rounded()))秒" }
+        let minutes = Int((etaSeconds / 60).rounded())
+        if minutes < 60 { return "残り約\(minutes)分" }
+        return "残り約\(minutes / 60)時間\(minutes % 60)分"
+    }
+
     func start(url: String, height: Int) {
         guard !busy else { return }
         do {
             let id = try Self.videoID(from: url)
             diagnostics = ""
-            record("アプリ v1.4 / iPhone単体処理・写真保存 / 画質上限 \(height)p")
+            record("アプリ v1.4.1 / iPhone単体処理・写真保存 / 画質上限 \(height)p")
             busy = true
+            startedAt = Date()
+            etaSeconds = nil; progressSamples = []
             operation = Task { await process(id: id, height: height) }
         } catch { message = error.localizedDescription }
     }
@@ -192,11 +237,13 @@ final class VideoStore: ObservableObject {
         }
     }
 
-    func download(_ url: URL, to destination: URL, label: String) async throws {
+    func download(_ url: URL, to destination: URL, label: String, slotStart: Double = 0, slotEnd: Double = 1) async throws {
         guard url.scheme == "https" else { throw ServiceError(message: "取得元がHTTPSではありません。") }
-        status = label; fraction = nil
+        status = label; setOverall(slotStart)
         let delegate = TransferProgress { [weak self] progress in
-            Task { @MainActor in self?.fraction = progress }
+            Task { @MainActor in
+                if let progress { self?.setOverall(slotStart + (slotEnd - slotStart) * progress) }
+            }
         }
         let (temp, response) = try await session.download(for: URLRequest(url: url), delegate: delegate)
         defer { try? FileManager.default.removeItem(at: temp) }
@@ -221,8 +268,10 @@ final class VideoStore: ObservableObject {
             throw ServiceError(message: "この映像・音声の組み合わせはMP4へ書き出せません。")
         }
         session.shouldOptimizeForNetworkUse = true
-        status = "iPhone内でMP4を書き出しています"; fraction = nil
-        try await MP4Exporter.run(session, to: output)
+        status = "iPhone内でMP4を書き出しています"
+        try await MP4Exporter.run(session, to: output) { [weak self] value in
+            Task { @MainActor in self?.setOverall(0.65 + 0.30 * value) }
+        }
     }
 
     func merge(video: URL, audio: URL, to output: URL) async throws {
@@ -266,7 +315,7 @@ final class VideoStore: ObservableObject {
         UIApplication.shared.isIdleTimerDisabled = true
         defer {
             try? FileManager.default.removeItem(at: folder)
-            busy = false; fraction = nil; operation = nil
+            busy = false; fraction = nil; etaSeconds = nil; progressSamples = []; operation = nil
             UIApplication.shared.isIdleTimerDisabled = previousIdleSetting
         }
         do {
@@ -286,6 +335,7 @@ final class VideoStore: ObservableObject {
             }
             let plans = DownloadPlanner.plans(sources, maxHeight: height)
             record("抽出 \(streams.count)件 / 音声付きで保存可能な候補 \(plans.count)件")
+            setOverall(0.05)
             guard !plans.isEmpty else {
                 throw ServiceError(message: "指定画質以下で映像と音声を保存できる形式がありません。別の画質または動画を試してください。")
             }
@@ -298,11 +348,16 @@ final class VideoStore: ObservableObject {
                 defer { try? FileManager.default.removeItem(at: attempt) }
                 do {
                     status = "候補 \(index + 1)/\(plans.count) を確認中"
+                    progressSamples = []; etaSeconds = nil; fraction = nil
                     let v = attempt.appendingPathComponent("video.mp4")
-                    try await download(plan.video.url, to: v, label: "映像を取得中（\(plan.video.resolution)p）")
+                    if plan.audio == nil {
+                        try await download(plan.video.url, to: v, label: "映像を取得中（\(plan.video.resolution)p）", slotStart: 0.05, slotEnd: 0.90)
+                    } else {
+                        try await download(plan.video.url, to: v, label: "映像を取得中（\(plan.video.resolution)p）", slotStart: 0.05, slotEnd: 0.50)
+                    }
                     if let audio = plan.audio {
                         let a = attempt.appendingPathComponent("audio.m4a")
-                        try await download(audio.url, to: a, label: "音声を取得中")
+                        try await download(audio.url, to: a, label: "音声を取得中", slotStart: 0.50, slotEnd: 0.65)
                         try await merge(video: v, audio: a, to: output)
                     } else {
                         try await validateMovie(v)
@@ -311,6 +366,7 @@ final class VideoStore: ObservableObject {
                     }
                     status = "保存したMP4を検証しています"
                     try await validateMovie(output)
+                    setOverall(0.97)
                     completed = true
                     break
                 } catch {
@@ -325,7 +381,8 @@ final class VideoStore: ObservableObject {
             do {
                 try await PhotosVideoSaver.save(output)
                 try? FileManager.default.removeItem(at: output)
-                status = "写真アプリに保存しました"
+                setOverall(1)
+                status = "写真アプリに保存しました（所要時間 \(elapsedText())）"
             } catch {
                 record("写真アプリへの保存に失敗: \(diagnosticError(error))")
                 status = "写真アプリへ保存できませんでした"
@@ -401,6 +458,16 @@ struct HomeView: View {
                     if store.busy {
                         if let fraction = store.fraction { ProgressView(value: fraction) }
                         else { ProgressView() }
+                        TimelineView(.periodic(from: store.startedAt ?? .now, by: 0.5)) { context in
+                            HStack(spacing: 12) {
+                                if let fraction = store.fraction { Text("全体 \(Int(fraction * 100))%") }
+                                Text("経過 \(store.elapsedText(at: context.date))")
+                                Spacer()
+                                if let eta = store.etaText { Text(eta) }
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
                         Button("中止する", role: .destructive) { store.cancel() }
                     }
                 }
