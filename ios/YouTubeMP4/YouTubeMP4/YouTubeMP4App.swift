@@ -134,6 +134,8 @@ final class VideoStore: ObservableObject {
     @Published var startedAt: Date?
     @Published var etaSeconds: Double?
     private var progressSamples: [(date: Date, value: Double)] = []
+    private var phaseCeiling: Double = 0
+    private var creepTask: Task<Void, Never>?
     @Published var message = ""
     private var operation: Task<Void, Never>?
     private let session: URLSession = {
@@ -183,7 +185,7 @@ final class VideoStore: ObservableObject {
         return id
     }
 
-    func cancel() { operation?.cancel() }
+    func cancel() { operation?.cancel(); stopCreep() }
 
     /// Overall 0...1 progress across every phase (fraction is reused as the
     /// overall value); derives a smoothed ETA from the progress rate over
@@ -201,6 +203,28 @@ final class VideoStore: ObservableObject {
                 etaSeconds = (1 - v) / (dv / dt)
             }
         }
+    }
+
+    /// While a phase runs, keeps the gauge moving toward the phase
+    /// ceiling even when no real progress is reported (unknown download
+    /// size, extraction wait, ...). Real progress always overrides this
+    /// estimate because setOverall() is called with the true value.
+    private func startCreep() {
+        creepTask?.cancel()
+        creepTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard let self, self.busy else { return }
+                if let f = self.fraction, f < self.phaseCeiling {
+                    self.setOverall(f + (self.phaseCeiling - f) * 0.04)
+                }
+            }
+        }
+    }
+
+    private func stopCreep() {
+        creepTask?.cancel()
+        creepTask = nil
     }
 
     func elapsedText(at now: Date = Date()) -> String {
@@ -222,10 +246,13 @@ final class VideoStore: ObservableObject {
         do {
             let id = try Self.videoID(from: url)
             diagnostics = ""
-            record("アプリ v1.4.1 / iPhone単体処理・写真保存 / 画質上限 \(height)p")
+            record("アプリ v1.4.2 / iPhone単体処理・写真保存 / 画質上限 \(height)p")
             busy = true
             startedAt = Date()
             etaSeconds = nil; progressSamples = []
+            phaseCeiling = 0.05
+            setOverall(0)
+            startCreep()
             operation = Task { await process(id: id, height: height) }
         } catch { message = error.localizedDescription }
     }
@@ -239,7 +266,7 @@ final class VideoStore: ObservableObject {
 
     func download(_ url: URL, to destination: URL, label: String, slotStart: Double = 0, slotEnd: Double = 1) async throws {
         guard url.scheme == "https" else { throw ServiceError(message: "取得元がHTTPSではありません。") }
-        status = label; setOverall(slotStart)
+        status = label; phaseCeiling = slotEnd; setOverall(slotStart)
         let delegate = TransferProgress { [weak self] progress in
             Task { @MainActor in
                 if let progress { self?.setOverall(slotStart + (slotEnd - slotStart) * progress) }
@@ -269,6 +296,7 @@ final class VideoStore: ObservableObject {
         }
         session.shouldOptimizeForNetworkUse = true
         status = "iPhone内でMP4を書き出しています"
+        phaseCeiling = 0.95
         try await MP4Exporter.run(session, to: output) { [weak self] value in
             Task { @MainActor in self?.setOverall(0.65 + 0.30 * value) }
         }
@@ -315,13 +343,15 @@ final class VideoStore: ObservableObject {
         UIApplication.shared.isIdleTimerDisabled = true
         defer {
             try? FileManager.default.removeItem(at: folder)
+            stopCreep()
             busy = false; fraction = nil; etaSeconds = nil; progressSamples = []; operation = nil
             UIApplication.shared.isIdleTimerDisabled = previousIdleSetting
         }
         do {
             try checkCapacity()
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            status = "iPhoneで動画情報を確認しています"; fraction = nil
+            status = "iPhoneで動画情報を確認しています"
+            phaseCeiling = 0.05
             // Explicitly disable YouTubeKit's remote extraction fallback.
             let youtube = YouTube(videoID: id, methods: [.local])
             let streams = try await youtube.streams
@@ -348,7 +378,7 @@ final class VideoStore: ObservableObject {
                 defer { try? FileManager.default.removeItem(at: attempt) }
                 do {
                     status = "候補 \(index + 1)/\(plans.count) を確認中"
-                    progressSamples = []; etaSeconds = nil; fraction = nil
+                    progressSamples = []; etaSeconds = nil; setOverall(0.05); phaseCeiling = 0.05
                     let v = attempt.appendingPathComponent("video.mp4")
                     if plan.audio == nil {
                         try await download(plan.video.url, to: v, label: "映像を取得中（\(plan.video.resolution)p）", slotStart: 0.05, slotEnd: 0.90)
@@ -365,6 +395,7 @@ final class VideoStore: ObservableObject {
                         try FileManager.default.moveItem(at: v, to: output)
                     }
                     status = "保存したMP4を検証しています"
+                    phaseCeiling = 0.97
                     try await validateMovie(output)
                     setOverall(0.97)
                     completed = true
@@ -378,6 +409,7 @@ final class VideoStore: ObservableObject {
             }
             guard completed else { throw lastError }
             status = "写真アプリに保存しています"
+            phaseCeiling = 1.0
             do {
                 try await PhotosVideoSaver.save(output)
                 try? FileManager.default.removeItem(at: output)
@@ -456,11 +488,10 @@ struct HomeView: View {
                         }
                     }
                     if store.busy {
-                        if let fraction = store.fraction { ProgressView(value: fraction) }
-                        else { ProgressView() }
+                        ProgressView(value: store.fraction ?? 0)
                         TimelineView(.periodic(from: store.startedAt ?? .now, by: 0.5)) { context in
                             HStack(spacing: 12) {
-                                if let fraction = store.fraction { Text("全体 \(Int(fraction * 100))%") }
+                                Text("全体 \(Int((store.fraction ?? 0) * 100))%")
                                 Text("経過 \(store.elapsedText(at: context.date))")
                                 Spacer()
                                 if let eta = store.etaText { Text(eta) }
