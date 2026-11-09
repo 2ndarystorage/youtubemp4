@@ -227,6 +227,12 @@ final class VideoStore: ObservableObject {
         creepTask = nil
     }
 
+    private var lastExportMode = ""
+
+    func secondsText(since start: Date) -> String {
+        String(format: "%.1f秒", Date().timeIntervalSince(start))
+    }
+
     func elapsedText(at now: Date = Date()) -> String {
         guard let startedAt else { return "0:00" }
         let s = max(0, Int(now.timeIntervalSince(startedAt)))
@@ -246,7 +252,7 @@ final class VideoStore: ObservableObject {
         do {
             let id = try Self.videoID(from: url)
             diagnostics = ""
-            record("アプリ v1.4.2 / iPhone単体処理・写真保存 / 画質上限 \(height)p")
+            record("アプリ v1.4.3 / iPhone単体処理・写真保存 / 画質上限 \(height)p")
             busy = true
             startedAt = Date()
             etaSeconds = nil; progressSamples = []
@@ -290,16 +296,36 @@ final class VideoStore: ObservableObject {
 
     private func export(_ asset: AVAsset, to output: URL) async throws {
         try Task.checkCancellation()
+        phaseCeiling = 0.95
+        // Fast path: passthrough remux without re-encoding. The download
+        // planner only selects MP4/M4A sources, so the tracks are normally
+        // already MP4-compatible and can be copied straight through.
+        if let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough),
+           session.supportedFileTypes.contains(.mp4) {
+            session.shouldOptimizeForNetworkUse = true
+            status = "iPhone内でMP4を書き出しています（高速）"
+            do {
+                try await MP4Exporter.run(session, to: output) { [weak self] value in
+                    Task { @MainActor in self?.setOverall(0.65 + 0.30 * value) }
+                }
+                lastExportMode = "パススルー（無再圧縮）"
+                return
+            } catch {
+                if Task.isCancelled { throw CancellationError() }
+                record("パススルー書き出しに失敗。再エンコードに切り替えます: \(diagnosticError(error))")
+                try? FileManager.default.removeItem(at: output)
+            }
+        }
         guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality),
               session.supportedFileTypes.contains(.mp4) else {
             throw ServiceError(message: "この映像・音声の組み合わせはMP4へ書き出せません。")
         }
         session.shouldOptimizeForNetworkUse = true
         status = "iPhone内でMP4を書き出しています"
-        phaseCeiling = 0.95
         try await MP4Exporter.run(session, to: output) { [weak self] value in
             Task { @MainActor in self?.setOverall(0.65 + 0.30 * value) }
         }
+        lastExportMode = "再エンコード"
     }
 
     func merge(video: URL, audio: URL, to output: URL) async throws {
@@ -347,6 +373,8 @@ final class VideoStore: ObservableObject {
             busy = false; fraction = nil; etaSeconds = nil; progressSamples = []; operation = nil
             UIApplication.shared.isIdleTimerDisabled = previousIdleSetting
         }
+        let processStart = Date()
+        lastExportMode = ""
         do {
             try checkCapacity()
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -365,6 +393,7 @@ final class VideoStore: ObservableObject {
             }
             let plans = DownloadPlanner.plans(sources, maxHeight: height)
             record("抽出 \(streams.count)件 / 音声付きで保存可能な候補 \(plans.count)件")
+            record("計測 情報取得: \(secondsText(since: processStart))")
             setOverall(0.05)
             guard !plans.isEmpty else {
                 throw ServiceError(message: "指定画質以下で映像と音声を保存できる形式がありません。別の画質または動画を試してください。")
@@ -380,15 +409,21 @@ final class VideoStore: ObservableObject {
                     status = "候補 \(index + 1)/\(plans.count) を確認中"
                     progressSamples = []; etaSeconds = nil; setOverall(0.05); phaseCeiling = 0.05
                     let v = attempt.appendingPathComponent("video.mp4")
+                    let videoStart = Date()
                     if plan.audio == nil {
                         try await download(plan.video.url, to: v, label: "映像を取得中（\(plan.video.resolution)p）", slotStart: 0.05, slotEnd: 0.90)
                     } else {
                         try await download(plan.video.url, to: v, label: "映像を取得中（\(plan.video.resolution)p）", slotStart: 0.05, slotEnd: 0.50)
                     }
+                    record("計測 映像DL: \(secondsText(since: videoStart))")
                     if let audio = plan.audio {
                         let a = attempt.appendingPathComponent("audio.m4a")
+                        let audioStart = Date()
                         try await download(audio.url, to: a, label: "音声を取得中", slotStart: 0.50, slotEnd: 0.65)
+                        record("計測 音声DL: \(secondsText(since: audioStart))")
+                        let mergeStart = Date()
                         try await merge(video: v, audio: a, to: output)
+                        record("計測 書き出し \(lastExportMode): \(secondsText(since: mergeStart))")
                     } else {
                         try await validateMovie(v)
                         try Task.checkCancellation()
@@ -410,11 +445,14 @@ final class VideoStore: ObservableObject {
             guard completed else { throw lastError }
             status = "写真アプリに保存しています"
             phaseCeiling = 1.0
+            let saveStart = Date()
             do {
                 try await PhotosVideoSaver.save(output)
+                record("計測 写真保存: \(secondsText(since: saveStart))")
                 try? FileManager.default.removeItem(at: output)
                 setOverall(1)
-                status = "写真アプリに保存しました（所要時間 \(elapsedText())）"
+                let modeNote = lastExportMode.hasPrefix("パススルー") ? "／高速結合" : ""
+                status = "写真アプリに保存しました（所要時間 \(elapsedText())\(modeNote)）"
             } catch {
                 record("写真アプリへの保存に失敗: \(diagnosticError(error))")
                 status = "写真アプリへ保存できませんでした"
