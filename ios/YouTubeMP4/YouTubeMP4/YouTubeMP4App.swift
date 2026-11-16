@@ -106,7 +106,7 @@ enum XVideoResolver {
                 $0.height == $1.height ? $0.bitrate > $1.bitrate : $0.height > $1.height
             }
             var seen = Set<URL>()
-            let urls = sorted.map(\.url).filter { seen.insert($0).inserted }
+            let urls = sorted.map { $0.url }.filter { seen.insert($0).inserted }
             if !urls.isEmpty { return Array(urls.prefix(6)) }
         }
         return []
