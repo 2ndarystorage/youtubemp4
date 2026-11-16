@@ -88,4 +88,57 @@ final class RuntimeTests: XCTestCase {
         catch is CancellationError { }
         XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
     }
+
+    func testRecognizesXPostURLsAndRejectsLookalikeHosts() throws {
+        XCTAssertEqual(try XVideoResolver.postID(from: "https://x.com/example/status/1548602399862013953?s=20"),
+                       "1548602399862013953")
+        XCTAssertEqual(try XVideoResolver.postID(from: "https://twitter.com/i/status/1548602399862013953"),
+                       "1548602399862013953")
+        XCTAssertThrowsError(try XVideoResolver.postID(from: "https://x.com.evil.test/example/status/1548602399862013953"))
+        XCTAssertThrowsError(try XVideoResolver.postID(from: "https://x.com/example/status/abc"))
+        XCTAssertThrowsError(try XVideoResolver.postID(from: "https://x.com/example"))
+        XCTAssertThrowsError(try XVideoResolver.postID(from: "https://x.com@example.test/example/status/1548602399862013953"))
+    }
+
+    func testChoosesXMP4UnderSelectedQualityAndRejectsExternalURLs() throws {
+        let json = """
+        {
+          "code": 200,
+          "status": {
+            "media": {
+              "videos": [
+                {
+                  "type": "video", "height": 1080, "url": "https://video.twimg.com/high.mp4",
+                  "formats": [
+                    {"container":"m3u8", "url":"https://video.twimg.com/playlist.m3u8", "height":720},
+                    {"container":"mp4", "url":"https://video.twimg.com/low.mp4", "height":320, "bitrate":100},
+                    {"container":"mp4", "url":"https://video.twimg.com/high.mp4", "height":1080, "bitrate":1000},
+                    {"container":"mp4", "url":"https://video.twimg.com/mid.mp4", "height":720, "bitrate":500},
+                    {"container":"mp4", "url":"https://video.twimg.com.evil.test/bad.mp4", "height":720}
+                  ]
+                }
+              ]
+            }
+          }
+        }
+        """
+        let response = try JSONDecoder().decode(XVideoResolver.APIResponse.self, from: Data(json.utf8))
+        XCTAssertEqual(XVideoResolver.candidates(in: response, maxHeight: 720).map(\.lastPathComponent),
+                       ["mid.mp4", "low.mp4"])
+        XCTAssertEqual(XVideoResolver.candidates(in: response, maxHeight: 360).map(\.lastPathComponent),
+                       ["low.mp4"])
+        XCTAssertEqual(XVideoResolver.candidates(in: response, maxHeight: 1080).first?.lastPathComponent,
+                       "high.mp4")
+        XCTAssertFalse(XVideoResolver.isXMP4(URL(string:"https://evil.test/video.mp4")!))
+        XCTAssertFalse(XVideoResolver.isXMP4(URL(string:"http://video.twimg.com/video.mp4")!))
+    }
+
+    func testXVideosMayBeSilentWithoutChangingYouTubeValidation() async throws {
+        let silent = try fixture("video", extension: "mp4")
+        try await VideoStore().validateMovie(silent, requiresAudio: false)
+        do {
+            try await VideoStore().validateMovie(silent)
+            XCTFail("YouTube validation must still require audio")
+        } catch { /* expected */ }
+    }
 }
