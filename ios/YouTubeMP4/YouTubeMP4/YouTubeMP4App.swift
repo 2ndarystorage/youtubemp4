@@ -29,6 +29,112 @@ struct DownloadPlan {
     let audio: MediaSource?
 }
 
+
+// Public X post extraction via FxEmbed. Only the post ID is sent to that
+// third-party service after the user opts in; no X login or cookies are used.
+enum XVideoResolver {
+    struct APIResponse: Decodable {
+        let code: Int
+        let status: Post?
+    }
+    struct Post: Decodable {
+        let media: Media?
+    }
+    struct Media: Decodable {
+        let videos: [Video]?
+    }
+    struct Video: Decodable {
+        let type: String
+        let url: String?
+        let height: Int?
+        let formats: [Format]?
+    }
+    struct Format: Decodable {
+        let container: String?
+        let url: String
+        let height: Int?
+        let bitrate: Int?
+    }
+
+    static func postID(from value: String) throws -> String {
+        guard let parts = URLComponents(string: value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              parts.scheme == "https" || parts.scheme == "http",
+              parts.user == nil, parts.password == nil,
+              parts.port == nil || parts.port == 80 || parts.port == 443,
+              let host = parts.host?.lowercased(),
+              ["x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"].contains(host) else {
+            throw ServiceError(message: "Xの公開ポストURLを入力してください。")
+        }
+        let segments = parts.path.split(separator: "/").map(String.init)
+        guard segments.count == 3,
+              segments[1].lowercased() == "status",
+              segments[0] == "i" || !segments[0].isEmpty,
+              segments[2].range(of: "^[0-9]{1,20}$", options: .regularExpression) != nil else {
+            throw ServiceError(message: "XのポストURL（.../status/数字）を入力してください。")
+        }
+        return segments[2]
+    }
+
+    // Avoid accepting URLs on arbitrary hosts returned from an external API.
+    static func isXMP4(_ url: URL) -> Bool {
+        guard url.scheme == "https", url.user == nil, url.password == nil,
+              url.port == nil || url.port == 443,
+              let host = url.host?.lowercased(),
+              host == "twimg.com" || host.hasSuffix(".twimg.com") else { return false }
+        return url.path.lowercased().hasSuffix(".mp4")
+    }
+
+    static func candidates(in response: APIResponse, maxHeight: Int) -> [URL] {
+        guard response.code == 200,
+              let videos = response.status?.media?.videos else { return [] }
+        for video in videos where video.type == "video" {
+            var choices: [(url: URL, height: Int, bitrate: Int)] = []
+            for format in video.formats ?? [] {
+                guard format.container == nil || format.container?.lowercased() == "mp4",
+                      let url = URL(string: format.url), isXMP4(url) else { continue }
+                let height = format.height ?? video.height ?? 0
+                if height > 0 && height <= maxHeight {
+                    choices.append((url, height, format.bitrate ?? 0))
+                }
+            }
+            // Legacy responses sometimes have a single direct MP4 URL.
+            if let raw = video.url, let url = URL(string: raw), isXMP4(url),
+               let height = video.height, height > 0 && height <= maxHeight {
+                choices.append((url, height, 0))
+            }
+            let sorted = choices.sorted {
+                $0.height == $1.height ? $0.bitrate > $1.bitrate : $0.height > $1.height
+            }
+            var seen = Set<URL>()
+            let urls = sorted.map(\.url).filter { seen.insert($0).inserted }
+            if !urls.isEmpty { return Array(urls.prefix(6)) }
+        }
+        return []
+    }
+
+    static func resolve(postID: String, maxHeight: Int, session: URLSession) async throws -> [URL] {
+        guard let url = URL(string: "https://api.fxtwitter.com/2/status/\(postID)") else {
+            throw ServiceError(message: "XのポストIDが不正です。")
+        }
+        var request = URLRequest(url: url)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await session.data(for: request)
+        try Task.checkCancellation()
+        guard let response = response as? HTTPURLResponse, (200...299).contains(response.statusCode) else {
+            throw ServiceError(message: "FxEmbedから動画情報を取得できませんでした。公開投稿か確認してください。")
+        }
+        guard data.count <= 2_000_000 else {
+            throw ServiceError(message: "X動画情報の応答が大きすぎます。")
+        }
+        let payload = try JSONDecoder().decode(APIResponse.self, from: data)
+        let urls = candidates(in: payload, maxHeight: maxHeight)
+        guard !urls.isEmpty else {
+            throw ServiceError(message: "このX投稿には指定画質以下の保存可能なMP4動画がありません。非公開・削除済み・GIF・外部リンクには対応しません。")
+        }
+        return urls
+    }
+}
+
 enum DownloadPlanner {
     static func plans(_ sources: [MediaSource], maxHeight: Int) -> [DownloadPlan] {
         let audio = sources.filter { $0.hasAudio && !$0.hasVideo }
@@ -247,19 +353,29 @@ final class VideoStore: ObservableObject {
         return "残り約\(minutes / 60)時間\(minutes % 60)分"
     }
 
-    func start(url: String, height: Int) {
+    func start(url: String, height: Int, allowFxEmbed: Bool = false) {
         guard !busy else { return }
         do {
-            let id = try Self.videoID(from: url)
+            let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+            let parts = URLComponents(string: trimmed)
+            let host = parts?.host?.lowercased() ?? ""
+            let isX = ["x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"].contains(host)
+            let identifier = try (isX ? XVideoResolver.postID(from: trimmed) : Self.videoID(from: trimmed))
+            if isX && !allowFxEmbed {
+                throw ServiceError(message: "X動画の解析にFxEmbedを利用するには、下の確認スイッチをオンにしてください。")
+            }
             diagnostics = ""
-            record("アプリ v1.4.3 / iPhone単体処理・写真保存 / 画質上限 \(height)p")
+            record("アプリ v1.5.0 / \(isX ? "X" : "YouTube") / 画質上限 \(height)p")
             busy = true
             startedAt = Date()
             etaSeconds = nil; progressSamples = []
             phaseCeiling = 0.05
             setOverall(0)
             startCreep()
-            operation = Task { await process(id: id, height: height) }
+            operation = Task {
+                if isX { await processX(id: identifier, height: height) }
+                else { await process(id: identifier, height: height) }
+            }
         } catch { message = error.localizedDescription }
     }
 
@@ -350,15 +466,86 @@ final class VideoStore: ObservableObject {
         try await export(composition, to: output)
     }
 
-    func validateMovie(_ url: URL) async throws {
+    func validateMovie(_ url: URL, requiresAudio: Bool = true) async throws {
         let asset = AVURLAsset(url: url)
         let video = try await asset.loadTracks(withMediaType: .video)
         let audio = try await asset.loadTracks(withMediaType: .audio)
         let duration = try await asset.load(.duration)
         let playable = try await asset.load(.isPlayable)
-        guard !video.isEmpty, !audio.isEmpty, playable,
+        guard !video.isEmpty, (!requiresAudio || !audio.isEmpty), playable,
               duration.seconds.isFinite, duration.seconds > 0 else {
             throw ServiceError(message: "保存したMP4の映像・音声・再生可能性を検証できませんでした。")
+        }
+    }
+
+
+    private func processX(id: String, height: Int) async {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let output = Self.documents.appendingPathComponent("X-\(id)-\(UUID().uuidString).mp4")
+        let previousIdleSetting = UIApplication.shared.isIdleTimerDisabled
+        UIApplication.shared.isIdleTimerDisabled = true
+        defer {
+            try? FileManager.default.removeItem(at: folder)
+            stopCreep()
+            busy = false; fraction = nil; etaSeconds = nil; progressSamples = []; operation = nil
+            UIApplication.shared.isIdleTimerDisabled = previousIdleSetting
+        }
+        do {
+            try checkCapacity()
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            status = "Xの公開ポストから動画情報を確認中（FxEmbed）"
+            phaseCeiling = 0.10
+            let candidates = try await XVideoResolver.resolve(postID: id, maxHeight: height, session: session)
+            record("X MP4候補: \(candidates.count)件")
+            setOverall(0.10)
+            var lastError: Error = ServiceError(message: "X動画の取得に失敗しました。")
+            var completed = false
+            for (index, url) in candidates.enumerated() {
+                try Task.checkCancellation()
+                let temporaryMovie = folder.appendingPathComponent("video-\(index).mp4")
+                do {
+                    status = "X動画を取得中（候補 \(index + 1)/\(candidates.count)）"
+                    try await download(url, to: temporaryMovie, label: status, slotStart: 0.10, slotEnd: 0.92)
+                    status = "保存したX動画を検証しています"
+                    phaseCeiling = 0.97
+                    // X permits silent video. YouTube still requires both tracks.
+                    try await validateMovie(temporaryMovie, requiresAudio: false)
+                    try Task.checkCancellation()
+                    try FileManager.default.moveItem(at: temporaryMovie, to: output)
+                    setOverall(0.97)
+                    completed = true
+                    break
+                } catch {
+                    try? FileManager.default.removeItem(at: temporaryMovie)
+                    if Task.isCancelled { throw CancellationError() }
+                    record("X候補 \(index + 1) 失敗: \(diagnosticError(error))")
+                    lastError = error
+                }
+            }
+            guard completed else { throw lastError }
+            status = "写真アプリに保存しています"
+            phaseCeiling = 1.0
+            do {
+                try await PhotosVideoSaver.save(output)
+                try? FileManager.default.removeItem(at: output)
+                setOverall(1)
+                status = "X動画を写真アプリに保存しました（所要時間 \(elapsedText())）"
+            } catch {
+                record("写真アプリへの保存に失敗: \(diagnosticError(error))")
+                status = "写真アプリへ保存できませんでした"
+                message = error.localizedDescription
+                    + "\n動画は「ファイル」アプリの「このiPhone内 → おうち動画保存」に残してあります。"
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: output)
+            if Task.isCancelled { status = "中止しました" }
+            else {
+                let failedStage = status
+                record(diagnosticError(error))
+                status = "X動画の取得に失敗しました"
+                message = "失敗した段階: \(failedStage)\n" + error.localizedDescription
+                    + "\n「診断ログを共有」から詳細を確認できます。"
+            }
         }
     }
 
@@ -475,7 +662,8 @@ final class VideoStore: ObservableObject {
 
 struct HomeView: View {
     @StateObject private var store = VideoStore()
-    @State private var youtubeURL = ""
+    @State private var videoURL = ""
+    @State private var allowFxEmbed = false
     @State private var height = 720
     @FocusState private var urlFieldFocused: Bool
     private var licenseText: String {
@@ -489,24 +677,28 @@ struct HomeView: View {
             List {
                 Section {
                     Label("iPhoneだけで取得し、写真に保存", systemImage: "iphone")
-                    Text("URLの取得からMP4化、写真アプリへの保存まで、この端末だけで処理します。保存先は写真アプリに絞っています。")
+                    Text("YouTubeまたはXの動画URLからiPhone内でMP4を取得し、写真アプリへ保存します。Xの公開投稿の解析にはFxEmbedを利用します。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("動画を取得") {
-                    TextField("YouTubeのURLを貼り付け", text: $youtubeURL)
+                    TextField("YouTubeまたはXのURL", text: $videoURL)
                         .keyboardType(.URL).textContentType(.URL)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .focused($urlFieldFocused).submitLabel(.done)
                         .onSubmit { urlFieldFocused = false }
-                        .accessibilityLabel("YouTubeのURL")
+                        .accessibilityLabel("YouTubeまたはXのURL")
                         .accessibilityIdentifier("youtubeURLField")
                         .disabled(store.busy)
+                    Toggle("X投稿IDのFxEmbed照会を許可する", isOn: $allowFxEmbed)
+                        .disabled(store.busy)
+                    Text("Xの場合のみ、公開ポストの数字IDを外部サービス FxEmbed に送信します。XのパスワードやCookieは送信しません。動画はXのCDNからiPhoneへ直接取得します。")
+                        .font(.caption).foregroundStyle(.secondary)
                     Picker("画質の上限", selection: $height) {
                         Text("360p").tag(360); Text("720p").tag(720); Text("1080p").tag(1080)
                     }.pickerStyle(.segmented).disabled(store.busy)
                     Button {
                         urlFieldFocused = false
-                        store.start(url: youtubeURL, height: height)
+                        store.start(url: videoURL, height: height, allowFxEmbed: allowFxEmbed)
                     } label: {
                         Label(store.busy ? "iPhoneで取得中…" : "取得して写真アプリに保存",
                               systemImage: "arrow.down.circle.fill")
@@ -515,7 +707,7 @@ struct HomeView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .accessibilityIdentifier("downloadOnIPhoneButton")
-                    .disabled(store.busy || youtubeURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(store.busy || videoURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 Section("処理状況") {
                     Text(store.status)
@@ -546,7 +738,9 @@ struct HomeView: View {
                             Text(licenseText).font(.caption).padding().textSelection(.enabled)
                         }.navigationTitle("YouTubeKit")
                     }
-                    Text("取得・保存する権限のある動画を使用してください。処理中はアプリを開いたままにしてください。長い動画は通信量・空き容量・電池を多く使います。")
+                    Text("取得・保存する権限のある公開動画に限って使用してください。Xの非公開・ログイン必須投稿には対応しません。Xの投稿に動画が複数ある場合は最初の1本を保存します。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Text("処理中はアプリを開いたままにしてください。長い動画は通信量・空き容量・電池を多く使います。")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }
