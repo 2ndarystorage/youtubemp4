@@ -94,6 +94,12 @@ final class RuntimeTests: XCTestCase {
                        "1548602399862013953")
         XCTAssertEqual(try XVideoResolver.postID(from: "https://twitter.com/i/status/1548602399862013953"),
                        "1548602399862013953")
+        XCTAssertEqual(try XVideoResolver.postID(from: "https://x.com/example/status/1548602399862013953/video/1?t=12"),
+                       "1548602399862013953")
+        XCTAssertEqual(try XVideoResolver.postID(from: "https://x.com/example/status/1548602399862013953/photo/1"),
+                       "1548602399862013953")
+        XCTAssertThrowsError(try XVideoResolver.postID(from: "https://x.com/example/status/1548602399862013953/video/2"))
+        XCTAssertThrowsError(try XVideoResolver.postID(from: "https://x.com/example/status/1548602399862013953/video/1/bad"))
         XCTAssertThrowsError(try XVideoResolver.postID(from: "https://x.com.evil.test/example/status/1548602399862013953"))
         XCTAssertThrowsError(try XVideoResolver.postID(from: "https://x.com/example/status/abc"))
         XCTAssertThrowsError(try XVideoResolver.postID(from: "https://x.com/example"))
