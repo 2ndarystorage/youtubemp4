@@ -66,11 +66,21 @@ enum XVideoResolver {
             throw ServiceError(message: "Xの公開ポストURLを入力してください。")
         }
         let segments = parts.path.split(separator: "/").map(String.init)
-        guard segments.count == 3,
+        guard segments.count >= 3,
               segments[1].lowercased() == "status",
-              segments[0] == "i" || !segments[0].isEmpty,
+              !segments[0].isEmpty,
               segments[2].range(of: "^[0-9]{1,20}$", options: .regularExpression) != nil else {
             throw ServiceError(message: "XのポストURL（.../status/数字）を入力してください。")
+        }
+        // X's share links may add /video/1 or /photo/1 after the post ID.
+        // Do not silently download video 1 when the link points to media 2+.
+        let suffix = Array(segments.dropFirst(3))
+        if !suffix.isEmpty {
+            guard suffix.count == 2,
+                  ["video", "photo"].contains(suffix[0].lowercased()),
+                  suffix[1] == "1" else {
+                throw ServiceError(message: "XのURL末尾が不正か、2件目以降のメディアが指定されています。投稿URL（.../status/数字）を入力してください。")
+            }
         }
         return segments[2]
     }
@@ -376,7 +386,12 @@ final class VideoStore: ObservableObject {
                 if isX { await processX(id: identifier, height: height) }
                 else { await process(id: identifier, height: height) }
             }
-        } catch { message = error.localizedDescription }
+        } catch {
+            diagnostics = ""
+            record("URL確認エラー: \(diagnosticError(error))")
+            status = "URLを確認してください"
+            message = error.localizedDescription
+        }
     }
 
     private func checkCapacity() throws {
