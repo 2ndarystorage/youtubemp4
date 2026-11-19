@@ -81,7 +81,7 @@
 			"buildSettings" = {
 				"COPY_PHASE_STRIP" = "NO";
 				"SDKROOT" = "iphoneos";
-				"IPHONEOS_DEPLOYMENT_TARGET" = "16.0";
+				"IPHONEOS_DEPLOYMENT_TARGET" = "18.0";
 				"SWIFT_VERSION" = "5.0";
 				"CLANG_ENABLE_MODULES" = "YES";
 				"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
@@ -96,7 +96,7 @@
 			"name" = "Release";
 			"buildSettings" = {
 				"SDKROOT" = "iphoneos";
-				"IPHONEOS_DEPLOYMENT_TARGET" = "16.0";
+				"IPHONEOS_DEPLOYMENT_TARGET" = "18.0";
 				"SWIFT_VERSION" = "5.0";
 				"CLANG_ENABLE_MODULES" = "YES";
 				"SWIFT_OPTIMIZATION_LEVEL" = "-O";
@@ -301,7 +301,7 @@
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
 				"GENERATE_INFOPLIST_FILE" = "YES";
 				"SWIFT_VERSION" = "5.0";
-				"IPHONEOS_DEPLOYMENT_TARGET" = "16.0";
+				"IPHONEOS_DEPLOYMENT_TARGET" = "18.0";
 				"TARGETED_DEVICE_FAMILY" = "1,2";
 				"CODE_SIGN_STYLE" = "Automatic";
 				"ENABLE_TESTABILITY" = "YES";
@@ -318,7 +318,7 @@
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
 				"GENERATE_INFOPLIST_FILE" = "YES";
 				"SWIFT_VERSION" = "5.0";
-				"IPHONEOS_DEPLOYMENT_TARGET" = "16.0";
+				"IPHONEOS_DEPLOYMENT_TARGET" = "18.0";
 				"TARGETED_DEVICE_FAMILY" = "1,2";
 				"CODE_SIGN_STYLE" = "Automatic";
 			};

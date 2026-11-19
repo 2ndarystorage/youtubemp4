@@ -164,44 +164,16 @@ enum MP4Exporter {
     static func run(_ session: AVAssetExportSession, to output: URL, reportProgress: (@Sendable (Double) -> Void)? = nil) async throws {
         try Task.checkCancellation()
         let poller = Task {
-            while !Task.isCancelled {
-                reportProgress?(Double(session.progress))
-                try? await Task.sleep(nanoseconds: 250_000_000)
+            for await state in session.states(updateInterval: 0.25) {
+                if case .exporting(let progress) = state {
+                    reportProgress?(progress.fractionCompleted)
+                }
             }
         }
         defer { poller.cancel() }
-        if #available(iOS 18.0, *) {
-            try await session.export(to: output, as: .mp4)
-        } else {
-            try await legacyExport(session, to: output)
-        }
+        try await session.export(to: output, as: .mp4)
         reportProgress?(1)
         try Task.checkCancellation()
-    }
-
-    // Kept without an `obsoleted` availability marker: with a deployment target
-    // at or above iOS 18 the marker makes this symbol unavailable to the compiler
-    // even inside the `#available` fallback branch above (iOS 26 SDK).
-    private static func legacyExport(_ session: AVAssetExportSession, to output: URL) async throws {
-        session.outputURL = output
-        session.outputFileType = .mp4
-        let cancellation = LegacyCancellation(session)
-        try await withTaskCancellationHandler(operation: {
-            try Task.checkCancellation()
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                session.exportAsynchronously { continuation.resume() }
-            }
-            try Task.checkCancellation()
-            guard session.status == .completed else {
-                throw session.error ?? ServiceError(message: "MP4の書き出しに失敗しました。")
-            }
-        }, onCancel: { Task { await cancellation.cancel() } })
-    }
-
-    @MainActor private final class LegacyCancellation {
-        let session: AVAssetExportSession
-        init(_ session: AVAssetExportSession) { self.session = session }
-        func cancel() { session.cancelExport() }
     }
 }
 
@@ -374,7 +346,7 @@ final class VideoStore: ObservableObject {
                 throw ServiceError(message: "X動画の解析にFxEmbedを利用するには、下の確認スイッチをオンにしてください。")
             }
             diagnostics = ""
-            record("アプリ v1.5.1 / \(isX ? "X" : "YouTube") / 画質上限 \(height)p")
+            record("アプリ v1.5.2 / \(isX ? "X" : "YouTube") / 画質上限 \(height)p")
             busy = true
             startedAt = Date()
             etaSeconds = nil; progressSamples = []
