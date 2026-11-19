@@ -84,6 +84,15 @@ enum XVideoResolver {
         return url.path.lowercased().hasSuffix(".mp4")
     }
 
+    // FxEmbed format entries carry no height; the resolution only appears
+    // as a path segment of the CDN URL, e.g. .../vid/avc1/1280x720/x.mp4.
+    static func heightFromURL(_ url: URL) -> Int? {
+        guard let range = url.path.range(of: "/[0-9]{2,5}x[0-9]{2,5}/", options: .regularExpression) else { return nil }
+        let parts = url.path[range].split(separator: "x")
+        guard parts.count == 2, let height = Int(parts[1]) else { return nil }
+        return height
+    }
+
     static func candidates(in response: APIResponse, maxHeight: Int) -> [URL] {
         guard response.code == 200,
               let videos = response.status?.media?.videos else { return [] }
@@ -92,7 +101,7 @@ enum XVideoResolver {
             for format in video.formats ?? [] {
                 guard format.container == nil || format.container?.lowercased() == "mp4",
                       let url = URL(string: format.url), isXMP4(url) else { continue }
-                let height = format.height ?? video.height ?? 0
+                let height = format.height ?? heightFromURL(url) ?? video.height ?? 0
                 if height > 0 && height <= maxHeight {
                     choices.append((url, height, format.bitrate ?? 0))
                 }
@@ -365,7 +374,7 @@ final class VideoStore: ObservableObject {
                 throw ServiceError(message: "X動画の解析にFxEmbedを利用するには、下の確認スイッチをオンにしてください。")
             }
             diagnostics = ""
-            record("アプリ v1.5.0 / \(isX ? "X" : "YouTube") / 画質上限 \(height)p")
+            record("アプリ v1.5.1 / \(isX ? "X" : "YouTube") / 画質上限 \(height)p")
             busy = true
             startedAt = Date()
             etaSeconds = nil; progressSamples = []
